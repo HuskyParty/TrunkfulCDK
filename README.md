@@ -81,7 +81,7 @@ One-page vertical view of end-to-end flow:
 
 ```mermaid
 flowchart TD
-    subgraph Producers["1) Producers"]
+    subgraph L1["1) Producers"]
         W["Web/Mobile"]
         P["POS"]
         S["Supplier"]
@@ -89,18 +89,18 @@ flowchart TD
         WH["Warehouse"]
     end
 
-    subgraph Intake["2) Intake and Normalization"]
+    subgraph L2["2) Intake and Normalize"]
         APIG["API Gateway"]
         IOT["IoT Core"]
         S3["S3 Trigger"]
         IL["Intake Lambdas<br/>(idempotency + write PENDING)"]
     end
 
-    subgraph Bus["3) Event Routing"]
+    subgraph L3["3) Event Bus"]
         EB{{"EventBridge Event Bus"}}
     end
 
-    subgraph Queues["4) Async Queues (+ DLQs)"]
+    subgraph L4["4) Async Queues (+ DLQs)"]
         OQ[["Order Queue"]]
         IQ[["Inventory Queue"]]
         BQ[["Billing Queue"]]
@@ -108,21 +108,20 @@ flowchart TD
         NQ[["Notification Queue"]]
     end
 
-    subgraph Services["5) Processing Services"]
-        OS["Order Service<br/>(Durable Lambda)"]
-        IS["Inventory Service<br/>(Durable Lambda)"]
+    subgraph L5["5) Processing Services"]
+        OS["Order Service - Durable Lambda"]
+        IS["Inventory Service - Durable Lambda"]
         BL["Billing Lambda"]
         FL["Fulfillment Lambda"]
         NL["Notification Lambda"]
     end
 
-    subgraph Data["6) Data + External Systems"]
+    subgraph L6["6) Data and Outputs"]
         ORD[("Orders Table")]
         INV[("Inventory Table")]
         PAY["Payment Provider"]
-        FH["Firehose"]
-        S3L["S3 Data Lake"]
-        ATH["Athena"]
+        ATH["Athena-ready analytics"]
+        OUT["Customer + Ops notifications"]
     end
 
     W --> APIG
@@ -140,7 +139,6 @@ flowchart TD
     EB --> BQ
     EB --> FQ
     EB --> NQ
-    EB -->|"All events"| FH --> S3L --> ATH
 
     OQ --> OS
     IQ --> IS
@@ -151,8 +149,10 @@ flowchart TD
     OS --> ORD
     OS --> INV
     OS --> PAY
-    OS -->|"OrderConfirmed/OrderFailed"| EB
+    OS -->|"OrderConfirmed / OrderFailed"| EB
     IS -->|"InventoryLow"| EB
+    NL --> OUT
+    EB -->|"All events via Firehose -> S3"| ATH
 ```
 
 ### Happy Path — Order Placed to Confirmed (Web/Mobile Channel)
@@ -176,7 +176,7 @@ flowchart TD
 
     subgraph Processing["2) Processing"]
         E1 --> Q[[SQS Order Queue]]
-        Q --> O[Order Service (Durable Lambda)]
+        Q --> O["Order Service - Durable Lambda"]
         Q -.-> ODLQ[/"Order DLQ"/]
         O --> V[(Inventory Table reserve)]
         O --> D2[(Orders status update)]
@@ -203,7 +203,7 @@ flowchart TD
     Pay -->|Declined| Release[(Release inventory)]
     Release --> Fail[(Mark order FAILED)]
     Fail --> EB{{EventBridge: OrderFailed}}
-    EB --> NQ[[Notification Queue]] --> Notify[Notification Lambda (SES/SNS)]
+    EB --> NQ[[Notification Queue]] --> Notify["Notification Lambda - SES/SNS"]
     NQ -.-> NDLQ[/"Notification DLQ"/]
     EB --> Forecast[Firehose -> S3 -> Athena]
 ```
