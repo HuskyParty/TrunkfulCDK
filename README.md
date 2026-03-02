@@ -2,11 +2,6 @@
 
 ### Architecture Design Document
 
-**Author:** Scott Bax
-**Date:** March 2026
-**Course:** CSEP 590B — Cloud Computing Architecture
-**Project:** Project 2 — Architecture Design Document
-
 ---
 
 ## Table of Contents
