@@ -9,6 +9,8 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Duration } from 'aws-cdk-lib';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as path from 'path';
 
 interface ProcessingProps {
@@ -37,117 +39,239 @@ export class ProcessingConstruct extends Construct {
   constructor(scope: Construct, id: string, props: ProcessingProps) {
     super(scope, id);
 
-    // ---------------------------------------------------------------
-    // 1. Order Service Lambda (Durable Execution)
-    // Uses @aws/durable-execution-sdk-js withDurableExecution wrapper.
-    // Durable execution mode enabled via Lambda console/CLI post-deploy.
-    // ---------------------------------------------------------------
-    const orderServiceFn = new NodejsFunction(this, 'OrderServiceFn', {
-      functionName: `${props.stageName}-trunkful-order-service`,
-      entry: path.join(__dirname, '../../lambda/order-service/index.ts'),
-      handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      timeout: Duration.seconds(60),
-      memorySize: 256,
-      tracing: lambda.Tracing.ACTIVE,
-      reservedConcurrentExecutions: props.reservedConcurrency.orderService,
-      environment: {
-        ORDERS_TABLE: props.ordersTable.tableName,
-        INVENTORY_TABLE: props.inventoryTable.tableName,
-        IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
-        EVENT_BUS_NAME: props.eventBus.eventBusName,
-      },
-      bundling: {
-        // Bundle the durable execution SDK (not available in Lambda runtime)
-        nodeModules: ['@aws/durable-execution-sdk-js'],
-      },
+    const lambdaDir = path.join(__dirname, '../../lambda');
+
+    // Helper: create a lightweight step function lambda
+    const createStepFn = (
+      constructId: string,
+      entry: string,
+      env: Record<string, string>,
+      timeout = 10,
+    ): NodejsFunction =>
+      new NodejsFunction(this, constructId, {
+        functionName: `${props.stageName}-trunkful-${constructId.replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')}`,
+        entry: path.join(lambdaDir, entry),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        timeout: Duration.seconds(timeout),
+        memorySize: 128,
+        tracing: lambda.Tracing.ACTIVE,
+        environment: env,
+      });
+
+    // =================================================================
+    // 1. Order Saga — Step Lambdas
+    // =================================================================
+
+    const orderEnv = {
+      ORDERS_TABLE: props.ordersTable.tableName,
+      EVENT_BUS_NAME: props.eventBus.eventBusName,
+    };
+
+    const validateFn = createStepFn('OrderValidate', 'order-steps/validate.ts', orderEnv);
+    const reserveInventoryFn = createStepFn('OrderReserve', 'order-steps/reserve-inventory.ts', orderEnv);
+    const processPaymentFn = createStepFn('OrderPayment', 'order-steps/process-payment.ts', {
+      ORDERS_TABLE: props.ordersTable.tableName,
+    }, 15);
+    const confirmOrderFn = createStepFn('OrderConfirm', 'order-steps/confirm-order.ts', orderEnv);
+    const releaseInventoryFn = createStepFn('OrderRelease', 'order-steps/release-inventory.ts', {
+      EVENT_BUS_NAME: props.eventBus.eventBusName,
+    });
+    const markFailedFn = createStepFn('OrderMarkFailed', 'order-steps/mark-failed.ts', orderEnv);
+
+    // Permissions for order step lambdas
+    for (const fn of [validateFn, reserveInventoryFn, confirmOrderFn, markFailedFn]) {
+      props.ordersTable.grantReadWriteData(fn);
+      props.eventBus.grantPutEventsTo(fn);
+    }
+    props.ordersTable.grantReadWriteData(processPaymentFn); // circuit breaker state
+    props.paymentSecret.grantRead(processPaymentFn);
+    props.eventBus.grantPutEventsTo(releaseInventoryFn);
+
+    // =================================================================
+    // 2. Order Saga — Step Functions State Machine
+    // =================================================================
+
+    // Error handlers
+    const markFailedEarly = new tasks.LambdaInvoke(this, 'MarkFailedEarly', {
+      lambdaFunction: markFailedFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
     });
 
-    props.ordersTable.grantReadWriteData(orderServiceFn);
-    props.inventoryTable.grantReadWriteData(orderServiceFn);
-    props.idempotencyTable.grantReadWriteData(orderServiceFn);
-    props.eventBus.grantPutEventsTo(orderServiceFn);
-    props.paymentSecret.grantRead(orderServiceFn);
+    const compensateRelease = new tasks.LambdaInvoke(this, 'CompensateRelease', {
+      lambdaFunction: releaseInventoryFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
 
-    // Durable execution SDK needs permission to checkpoint and read state.
-    // Use a scoped wildcard to avoid a circular dependency between function and role.
-    orderServiceFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          'lambda:GetDurableExecutionState',
-          'lambda:CheckpointDurableExecution',
-        ],
-        resources: ['*'],
-      }),
-    );
+    const markFailedAfterComp = new tasks.LambdaInvoke(this, 'MarkFailedAfterComp', {
+      lambdaFunction: markFailedFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
 
-    orderServiceFn.addEventSource(
+    compensateRelease.next(markFailedAfterComp);
+
+    // Main saga steps
+    const validateOrder = new tasks.LambdaInvoke(this, 'ValidateOrder', {
+      lambdaFunction: validateFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+
+    const reserveInventory = new tasks.LambdaInvoke(this, 'ReserveInventory', {
+      lambdaFunction: reserveInventoryFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+
+    const processPayment = new tasks.LambdaInvoke(this, 'ProcessPayment', {
+      lambdaFunction: processPaymentFn,
+      payloadResponseOnly: true,
+      resultPath: '$',
+    });
+
+    const confirmOrder = new tasks.LambdaInvoke(this, 'ConfirmOrder', {
+      lambdaFunction: confirmOrderFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+
+    // Catch: before inventory reserved → mark failed only
+    validateOrder.addCatch(markFailedEarly, { resultPath: '$.error' });
+    reserveInventory.addCatch(markFailedEarly, { resultPath: '$.error' });
+
+    // Catch: after inventory reserved → release then mark failed
+    processPayment.addCatch(compensateRelease, { resultPath: '$.error' });
+    confirmOrder.addCatch(compensateRelease, { resultPath: '$.error' });
+
+    // Add per-step retry for transient errors
+    for (const step of [validateOrder, reserveInventory, processPayment, confirmOrder]) {
+      step.addRetry({
+        errors: ['States.TaskFailed'],
+        maxAttempts: 2,
+        backoffRate: 2,
+        interval: Duration.seconds(1),
+      });
+    }
+
+    const orderSagaChain = validateOrder
+      .next(reserveInventory)
+      .next(processPayment)
+      .next(confirmOrder);
+
+    const orderSagaSM = new sfn.StateMachine(this, 'OrderSagaSM', {
+      stateMachineName: `${props.stageName}-trunkful-order-saga`,
+      definitionBody: sfn.DefinitionBody.fromChainable(orderSagaChain),
+      timeout: Duration.minutes(5),
+      tracingEnabled: true,
+    });
+
+    // =================================================================
+    // 3. Order Saga — Starter Lambda (SQS → Step Functions)
+    // =================================================================
+
+    const orderSagaTriggerFn = createStepFn('OrderSagaTrigger', 'order-steps/trigger.ts', {
+      STATE_MACHINE_ARN: orderSagaSM.stateMachineArn,
+    });
+
+    orderSagaSM.grantStartExecution(orderSagaTriggerFn);
+
+    orderSagaTriggerFn.addEventSource(
       new SqsEventSource(props.orderQueue, { batchSize: 1 }),
     );
 
-    // Version + alias for durable execution configuration
-    const orderServiceVersion = orderServiceFn.currentVersion;
-    new lambda.Alias(this, 'OrderServiceAlias', {
-      aliasName: 'live',
-      version: orderServiceVersion,
+    // =================================================================
+    // 4. Inventory Workflow — Step Lambda
+    // =================================================================
+
+    const processItemFn = createStepFn('InvProcessItem', 'inventory-steps/process-item.ts', {
+      INVENTORY_TABLE: props.inventoryTable.tableName,
+      EVENT_BUS_NAME: props.eventBus.eventBusName,
+      IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
     });
 
-    // ---------------------------------------------------------------
-    // 2. Inventory Service Lambda (Durable Execution)
-    // Uses @aws/durable-execution-sdk-js withDurableExecution wrapper.
-    // Durable execution mode enabled via Lambda console/CLI post-deploy.
-    // ---------------------------------------------------------------
-    const inventoryServiceFn = new NodejsFunction(this, 'InventoryServiceFn', {
-      functionName: `${props.stageName}-trunkful-inventory-service`,
-      entry: path.join(__dirname, '../../lambda/inventory-service/index.ts'),
-      handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      timeout: Duration.seconds(30),
-      memorySize: 256,
-      tracing: lambda.Tracing.ACTIVE,
-      reservedConcurrentExecutions: props.reservedConcurrency.inventoryService,
-      environment: {
-        INVENTORY_TABLE: props.inventoryTable.tableName,
-        IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
-        EVENT_BUS_NAME: props.eventBus.eventBusName,
-      },
-      bundling: {
-        nodeModules: ['@aws/durable-execution-sdk-js'],
+    props.inventoryTable.grantReadWriteData(processItemFn);
+    props.idempotencyTable.grantReadWriteData(processItemFn);
+    props.eventBus.grantPutEventsTo(processItemFn);
+
+    // =================================================================
+    // 5. Inventory Workflow — Step Functions State Machine
+    // =================================================================
+
+    // Normalize EventBridge envelope (detail-type has a hyphen)
+    const normalizeInput = new sfn.Pass(this, 'NormalizeInventoryInput', {
+      parameters: {
+        'detailType.$': "$['detail-type']",
+        'detail.$': '$.detail',
       },
     });
 
-    props.inventoryTable.grantReadWriteData(inventoryServiceFn);
-    props.idempotencyTable.grantReadWriteData(inventoryServiceFn);
-    props.eventBus.grantPutEventsTo(inventoryServiceFn);
+    // OrderCreated branch: Map over items
+    const processReservationItem = new tasks.LambdaInvoke(this, 'ProcessReservationItem', {
+      lambdaFunction: processItemFn,
+      payloadResponseOnly: true,
+    });
 
-    // Durable execution SDK needs permission to checkpoint and read state.
-    inventoryServiceFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          'lambda:GetDurableExecutionState',
-          'lambda:CheckpointDurableExecution',
-        ],
-        resources: ['*'],
-      }),
-    );
+    const mapOrderItems = new sfn.Map(this, 'MapOrderItems', {
+      itemsPath: '$.detail.items',
+      itemSelector: {
+        'sku.$': '$$.Map.Item.Value.sku',
+        'quantity.$': '$$.Map.Item.Value.quantity',
+        'orderId.$': '$.detail.orderId',
+        'isReservation': true,
+      },
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+    mapOrderItems.itemProcessor(processReservationItem);
 
-    inventoryServiceFn.addEventSource(
+    // Generic branch: pass detail directly to process-item
+    const extractGenericDetail = new sfn.Pass(this, 'ExtractGenericDetail', {
+      inputPath: '$.detail',
+    });
+
+    const processGenericItem = new tasks.LambdaInvoke(this, 'ProcessGenericItem', {
+      lambdaFunction: processItemFn,
+      payloadResponseOnly: true,
+    });
+
+    const eventTypeChoice = new sfn.Choice(this, 'InventoryEventType')
+      .when(
+        sfn.Condition.stringEquals('$.detailType', 'OrderCreated'),
+        mapOrderItems,
+      )
+      .otherwise(extractGenericDetail.next(processGenericItem));
+
+    const inventoryDefinition = normalizeInput.next(eventTypeChoice);
+
+    const inventoryWorkflowSM = new sfn.StateMachine(this, 'InventoryWorkflowSM', {
+      stateMachineName: `${props.stageName}-trunkful-inventory-workflow`,
+      definitionBody: sfn.DefinitionBody.fromChainable(inventoryDefinition),
+      timeout: Duration.minutes(5),
+      tracingEnabled: true,
+    });
+
+    // =================================================================
+    // 6. Inventory Workflow — Starter Lambda (SQS → Step Functions)
+    // =================================================================
+
+    const inventoryWorkflowTriggerFn = createStepFn('InventoryWorkflowTrigger', 'inventory-steps/trigger.ts', {
+      STATE_MACHINE_ARN: inventoryWorkflowSM.stateMachineArn,
+    });
+
+    inventoryWorkflowSM.grantStartExecution(inventoryWorkflowTriggerFn);
+
+    inventoryWorkflowTriggerFn.addEventSource(
       new SqsEventSource(props.inventoryQueue, { batchSize: 1 }),
     );
 
-    // Version + alias for durable execution configuration
-    const inventoryServiceVersion = inventoryServiceFn.currentVersion;
-    new lambda.Alias(this, 'InventoryServiceAlias', {
-      aliasName: 'live',
-      version: inventoryServiceVersion,
-    });
-
-    // ---------------------------------------------------------------
-    // 3. Billing Lambda
-    // ---------------------------------------------------------------
+    // =================================================================
+    // 7. Billing Lambda (unchanged)
+    // =================================================================
     const billingFn = new NodejsFunction(this, 'BillingFn', {
       functionName: `${props.stageName}-trunkful-billing`,
-      entry: path.join(__dirname, '../../lambda/billing/index.ts'),
+      entry: path.join(lambdaDir, 'billing/index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: Duration.seconds(30),
@@ -167,12 +291,12 @@ export class ProcessingConstruct extends Construct {
       new SqsEventSource(props.billingQueue, { batchSize: 5 }),
     );
 
-    // ---------------------------------------------------------------
-    // 4. Fulfillment Lambda
-    // ---------------------------------------------------------------
+    // =================================================================
+    // 8. Fulfillment Lambda (unchanged)
+    // =================================================================
     const fulfillmentFn = new NodejsFunction(this, 'FulfillmentFn', {
       functionName: `${props.stageName}-trunkful-fulfillment`,
-      entry: path.join(__dirname, '../../lambda/fulfillment/index.ts'),
+      entry: path.join(lambdaDir, 'fulfillment/index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: Duration.seconds(30),
@@ -192,12 +316,12 @@ export class ProcessingConstruct extends Construct {
       new SqsEventSource(props.fulfillmentQueue, { batchSize: 5 }),
     );
 
-    // ---------------------------------------------------------------
-    // 5. Notification Lambda
-    // ---------------------------------------------------------------
+    // =================================================================
+    // 9. Notification Lambda (unchanged)
+    // =================================================================
     const notificationFn = new NodejsFunction(this, 'NotificationFn', {
       functionName: `${props.stageName}-trunkful-notification`,
-      entry: path.join(__dirname, '../../lambda/notification/index.ts'),
+      entry: path.join(lambdaDir, 'notification/index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: Duration.seconds(30),

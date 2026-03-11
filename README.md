@@ -1,8 +1,8 @@
 # TrunkfulCDK
 
 Event-driven inventory and order processing system for a mid-size retailer.
-AWS CDK (TypeScript). 5 ingestion channels, durable Lambda sagas,
-EventBridge routing, SQS + DLQ resilience.
+AWS CDK (TypeScript). 5 ingestion channels, Step Functions sagas,
+EventBridge routing, SQS buffering + DLQ resilience.
 
 ---
 
@@ -29,7 +29,7 @@ TrunkfulCDK/
 │   │   ├── ingestion-iot.ts                     IoT Core topic rule → POS Lambda
 │   │   ├── ingestion-s3.ts                      S3 upload bucket → admin ingest Lambda
 │   │   ├── ingestion-warehouse.ts               IAM role for direct PutEvents
-│   │   ├── processing.ts                        5 processing Lambdas + SQS event sources
+│   │   ├── processing.ts                        Step Functions state machines + step Lambdas + SQS event sources
 │   │   ├── analytics.ts                         Firehose → S3 → Glue → Athena
 │   │   └── monitoring.ts                        CloudWatch dashboard + 6 alarms
 │   └── shared/
@@ -46,10 +46,20 @@ TrunkfulCDK/
 │   ├── webhook-intake/index.ts                  Supplier webhook → header auth → DDB + emit
 │   ├── admin-ingest/index.ts                    S3 JSON upload → batch process → DDB + emit
 │   ├── order-service/
-│   │   ├── index.ts                             Durable saga: validate → reserve → pay → confirm
 │   │   ├── circuit-breaker.ts                   DDB-backed circuit breaker (5 failures → OPEN)
 │   │   └── payment-client.ts                    Payment provider stub
-│   ├── inventory-service/index.ts               Durable: per-item stock reservation + low alerts
+│   ├── order-steps/
+│   │   ├── validate.ts                          Step 1: validate order fields, DDB → VALIDATING
+│   │   ├── reserve-inventory.ts                 Step 2: DDB → RESERVED, emit OrderReserved
+│   │   ├── process-payment.ts                   Step 3: circuit breaker + payment call
+│   │   ├── confirm-order.ts                     Step 4: DDB → CONFIRMED, emit OrderConfirmed
+│   │   ├── release-inventory.ts                 Compensation: emit InventoryReleaseRequested
+│   │   ├── mark-failed.ts                       Terminal: DDB → FAILED, emit OrderFailed
+│   │   ├── trigger.ts                            SQS → StartExecution trigger
+│   │   └── shared.ts                            DDB/EventBridge helpers
+│   ├── inventory-steps/
+│   │   ├── process-item.ts                      Single item adjustment + idempotency guard
+│   │   └── trigger.ts                            SQS → StartExecution trigger
 │   ├── billing/index.ts                         Billing stub
 │   ├── fulfillment/index.ts                     Fulfillment stub
 │   └── notification/index.ts                    SES/SNS + KMS PII decrypt
@@ -62,8 +72,8 @@ TrunkfulCDK/
     ├── event-routing.md                         Event → rule → queue diagrams
     ├── happy-path.md                            Order confirmed walkthrough
     ├── failure-path.md                          3 failure scenarios + resilience layers
-    ├── order-service-flow.md                    Durable saga + SQS DLQ detail
-    ├── inventory-flow.md                        Multi-item reservation + feedback loop fix
+    ├── order-service-flow.md                    Step Functions saga + SQS DLQ detail
+    ├── inventory-flow.md                        Step Functions Map state + idempotency + feedback loop fix
     └── cdk-getting-started.md                   CDK CLI commands reference
 ```
 
@@ -93,17 +103,23 @@ TrunkfulCDK/
          │           │          │            │           │
          └─────┬─────┴──────┬──┴────────────┴───────────┘
                │            │
+               │ DDB Put    │ PutEvents
+               │ (PENDING)  │ (OrderCreated)
                v            v
   ┌──────────────┐  ┌─────────────────────────────────────────────┐
   │   DynamoDB   │  │            TrunkfulEventBus                  │
   │   Orders     │  │         (custom EventBridge bus)             │
   │   table      │  │                                              │
-  │              │  │  6 rules route events to domain queues       │
-  │  PENDING     │  │  and Firehose (analytics)                    │
+  │              │  │  6 rules evaluate in parallel:               │
+  │  PENDING     │  │  pattern-match on detail-type                │
   └──────────────┘  └──────────────────┬──────────────────────────┘
                                        │
          ┌─────────┬──────────┬────────┼────────┬──────────┐
          │         │          │        │        │          │
+         │ Order   │ Order    │ Order  │ Order  │ Order    │ ALL
+         │ Created │ Created  │Confirm-│Confirm-│Confirmed │events
+         │         │ +Inv.Rcvd│ ed     │ ed     │+Failed   │
+         │         │ +Return  │        │        │+Inv.Low  │
          v         v          v        v        v          v
   ┌──────────┐ ┌────────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐
   │  order   │ │inven-  │ │bill- │ │ful-  │ │noti- │ │Firehose│
@@ -111,14 +127,23 @@ TrunkfulCDK/
   │          │ │queue   │ │queue │ │ment  │ │tion  │ │→ Glue  │
   │ batch:1  │ │batch:1 │ │      │ │queue │ │queue │ │→ Athena│
   └────┬─────┘ └───┬────┘ └──┬───┘ └──┬───┘ └──┬───┘ └────────┘
-       │           │         │        │        │
+       │ SQS poll  │SQS poll │        │        │
        v           v         v        v        v
   ┌─────────┐ ┌────────┐ ┌──────┐ ┌──────┐ ┌──────┐
   │ order   │ │inven-  │ │bill- │ │ful-  │ │noti- │
-  │ service │ │tory    │ │ing   │ │fill- │ │fica- │
-  │(durable)│ │service │ │      │ │ment  │ │tion  │
-  │         │ │(durable│ │      │ │      │ │      │
-  └─────────┘ └────────┘ └──────┘ └──────┘ └──────┘
+  │ saga    │ │tory    │ │ing   │ │fill- │ │fica- │
+  │ trigger │ │workflow│ │      │ │ment  │ │tion  │
+  │    │    │ │trigger │ │      │ │      │ │      │
+  └────┼────┘ └───┼────┘ └──────┘ └──────┘ └──────┘
+       │Start     │Start
+       │Execution │Execution
+       v          v
+  ┌─────────┐ ┌────────┐
+  │ Order   │ │Inven-  │
+  │ Saga    │ │tory    │
+  │ State   │ │Workflow│
+  │ Machine │ │  SM    │
+  └─────────┘ └────────┘
 ```
 
 ---
@@ -164,50 +189,71 @@ back would create an infinite feedback loop with double-counted stock.
 ```
   Customer places order via POST /orders (Cognito auth)
 
-  ┌──────────┐  POST /orders  ┌──────────────┐  PutEvents  ┌─────────────────┐
-  │  Web /   │───────────────>│ order-intake  │────────────>│ TrunkfulEventBus │
-  │  Mobile  │                │   Lambda      │             │                  │
-  └──────────┘                └──────┬───────┘             └────────┬──────────┘
-                                     │                              │
-                                     v                              │
-                              ┌─────────────┐                       │
-                              │  DynamoDB   │        OrderCreated   │
-                              │  Orders     │        matches Rule   │
-                              │  PENDING    │        1 + 2 + 6      │
-                              └─────────────┘                       │
-                                             ┌──────────────────────┤
-                                             │                      │
+  ┌──────────┐  POST /orders  ┌──────────────┐                ┌─────────────────┐
+  │  Web /   │───────────────>│ order-intake  │──PutEvents───>│ TrunkfulEventBus │
+  │  Mobile  │  (Cognito auth)│   Lambda      │ (OrderCreated)│                  │
+  └──────────┘                └──────┬───────┘               └────────┬──────────┘
+                                     │                                │
+                                     │ DDB PutItem                    │
+                                     v (status: PENDING)              │
+                              ┌─────────────┐                        │
+                              │  DynamoDB   │     OrderCreated event  │
+                              │  Orders     │     OrderCreated matches│
+                              │             │     Rule 1, 2, 6       │
+                              │  PENDING    │                        │
+                              └─────────────┘                        │
+                                             ┌───────────────────────┤
+                                             │ Rule 1               │ Rule 2
+                                             │ (OrderCreated        │ (InvEvents
+                                             │  →OrderQ)            │  →InvQ)
                                              v                      v
                                       ┌────────────┐       ┌─────────────┐
                                       │order-queue │       │inventory-   │
-                                      └─────┬──────┘       │queue        │
-                                            │              └──────┬──────┘
+                                      │   (SQS)    │       │queue (SQS)  │
+                                      └─────┬──────┘       └──────┬──────┘
+                                            │ SQS poll            │ SQS poll
                                             v                     v
-  ┌─────────────────────────────────────────────┐  ┌──────────────────────────┐
-  │  ORDER SERVICE (durable)                     │  │  INVENTORY SERVICE       │
-  │                                              │  │                          │
-  │  step: validate-order                        │  │  For each line item:     │
-  │    DDB → VALIDATING, emit OrderValidated     │  │    step: reserve-SKU-WH  │
-  │                                              │  │      DDB ADD qty: -N     │
-  │  step: reserve-inventory                     │  │      emit Inventory-     │
-  │    DDB → RESERVED, emit OrderReserved        │  │        Adjusted          │
-  │                                              │  │                          │
-  │  step: process-payment                       │  │    (if qty < 10)         │
-  │    circuit breaker check → processPayment()  │  │      emit InventoryLow   │
-  │                                              │  └──────────────────────────┘
-  │  step: confirm-order                         │
+                                     ┌────────────┐       ┌────────────┐
+                                     │ order-saga │       │ inventory- │
+                                     │ trigger λ  │       │ workflow   │
+                                     └─────┬──────┘       │ trigger λ  │
+                                           │              └──────┬─────┘
+                                           │StartExecution       │StartExecution
+                                           v                     v
+  ┌──────────────────────────────────────────────┐  ┌──────────────────────────┐
+  │  ORDER SAGA (Step Functions)                  │  │  INVENTORY WORKFLOW (SF) │
+  │                                               │  │                          │
+  │  ValidateOrder (Lambda)                       │  │  Choice: OrderCreated    │
+  │    DDB → VALIDATING, emit OrderValidated      │  │    → Map (per item):    │
+  │                                               │  │       ProcessItem (λ)   │
+  │  ReserveInventory (Lambda)                    │  │         DDB ADD qty: -N  │
+  │    DDB → RESERVED, emit OrderReserved         │  │         emit Inventory-  │
+  │                                               │  │           Adjusted       │
+  │  ProcessPayment (Lambda)                      │  │                          │
+  │    circuit breaker → processPayment()         │  │       (if qty < 10)      │
+  │                                               │  │         emit InventoryLow│
+  │  ConfirmOrder (Lambda)                        │  └──────────────────────────┘
   │    DDB → CONFIRMED, emit OrderConfirmed ─────────────────────────────────┐
-  │                                              │                           │
-  └──────────────────────────────────────────────┘                           │
+  │                                               │                          │
+  └───────────────────────────────────────────────┘                          │
                                                                              │
-               OrderConfirmed matches Rule 3 + 4 + 5 + 6                    │
-               ┌───────────────────┬───────────────────┐                     │
-               v                   v                   v                     v
-        ┌────────────┐     ┌─────────────┐     ┌────────────┐        ┌───────────┐
-        │  BILLING   │     │ FULFILLMENT │     │NOTIFICATION│        │ Firehose  │
-        │  generate  │     │  initiate   │     │  send email│        │ → S3      │
-        │  invoice   │     │  shipping   │     │  (SES)     │        │ → Athena  │
-        └────────────┘     └─────────────┘     └────────────┘        └───────────┘
+    emit OrderConfirmed ──> EventBridge ──> matches Rule 3, 4, 5, 6       │
+               ┌───────────────────┬───────────────────┐                  │
+               │ Rule 3            │ Rule 4            │ Rule 5           │Rule 6
+               │ (Confirmed       │ (Confirmed        │ (Notification    │(All→
+               │  →BillingQ)       │  →FulfillQ)       │  Events)         │Firehose)
+               v                   v                   v                  v
+        ┌────────────┐     ┌─────────────┐     ┌────────────┐     ┌───────────┐
+        │billing-    │     │fulfillment- │     │notification│     │ Firehose  │
+        │queue (SQS) │     │queue (SQS)  │     │-queue (SQS)│     │ → S3      │
+        └─────┬──────┘     └──────┬──────┘     └─────┬──────┘     │ → Athena  │
+              │ SQS poll          │ SQS poll          │ SQS poll   └───────────┘
+              v                   v                   v
+        ┌────────────┐     ┌─────────────┐     ┌────────────┐
+        │  BILLING   │     │ FULFILLMENT │     │NOTIFICATION│
+        │  generate  │     │  initiate   │     │  send email│
+        │  invoice   │     │  shipping   │     │  (SES)     │
+        └────────────┘     └─────────────┘     └────────────┘
 
 
   Order status: PENDING ──> VALIDATING ──> RESERVED ──> CONFIRMED
@@ -217,27 +263,31 @@ back would create an infinite feedback loop with double-counted stock.
 
 ## Failure Path: Payment Declined
 
-The saga catches the error, runs compensation, and returns normally.
-SQS deletes the message. No retry needed.
+Step Functions Catch fires, compensation states run inline.
+The state machine completes normally. SQS deletes the message.
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
-  │  ORDER SERVICE (durable)                                         │
+  │  ORDER SAGA (Step Functions)                                     │
   │                                                                  │
-  │  step: validate-order        ── OK ── CHECKPOINT ✓              │
-  │  step: reserve-inventory     ── OK ── CHECKPOINT ✓              │
-  │  step: process-payment       ── DECLINED ── THROWS              │
+  │  ValidateOrder               ── OK                               │
+  │  ReserveInventory            ── OK                               │
+  │  ProcessPayment              ── DECLINED ── THROWS               │
   │         │                                                        │
-  │         v                                                        │
+  │         v  Step Functions Catch fires                             │
+  │                                                                  │
   │  ┌─────────────────────────────────────────────┐                 │
-  │  │  COMPENSATION                                │                 │
+  │  │  COMPENSATION STATES                         │                 │
   │  │                                              │                 │
-  │  │  1. emit InventoryReleaseRequested           │                 │
-  │  │  2. DDB → FAILED                             │                 │
-  │  │  3. emit OrderFailed ───────────────────────────────────────┐ │
+  │  │  CompensateRelease (Lambda)                  │                 │
+  │  │    └─ emit InventoryReleaseRequested         │                 │
+  │  │                                              │                 │
+  │  │  MarkFailedAfterComp (Lambda)                │                 │
+  │  │    ├─ DDB → FAILED                           │                 │
+  │  │    └─ emit OrderFailed ─────────────────────────────────────┐ │
   │  └─────────────────────────────────────────────┘               │ │
   │                                                                 │ │
-  │  return { status: 'FAILED' }  ← handler succeeds, no retry     │ │
+  │  Execution completes ← compensation ran, no SQS retry needed    │ │
   └─────────────────────────────────────────────────────────────────┘ │
                                                                       │
                   OrderFailed → Rule 5 + 6                            │
@@ -256,10 +306,12 @@ SQS deletes the message. No retry needed.
 
 ---
 
-## Failure Path: Unhandled Crash → SQS Retry → DLQ
+## Failure Path: Trigger Lambda Crash → SQS Retry → DLQ
 
-Lambda crashes (e.g. OOM). SQS retries 3 times. Durable checkpoints
-survive across all attempts — completed steps are never re-executed.
+If the trigger Lambda crashes before calling `StartExecution`, SQS
+retries 3 times. If the state machine itself fails, Step Functions
+Catch states handle compensation inline — no SQS retry needed for
+business failures.
 
 ```
   SQS: order-queue                   │
@@ -267,26 +319,22 @@ survive across all attempts — completed steps are never re-executed.
   │
   │  ATTEMPT 1 (receiveCount: 1)
   │  ┌──────────────────────────────────────────────────┐
-  │  │  step: validate-order     → CHECKPOINT ✓          │
-  │  │  step: reserve-inventory  → CHECKPOINT ✓          │
-  │  │  step: process-payment    → ██ OOM CRASH ██       │
+  │  │  Starter Lambda → StartExecution                  │
+  │  │  State Machine runs:                              │
+  │  │    ValidateOrder    → OK                          │
+  │  │    ReserveInventory → OK                          │
+  │  │    ProcessPayment   → THROWS (service down)       │
+  │  │    Catch → CompensateRelease → MarkFailed         │
+  │  │  SM completes with compensation. No retry needed. │
   │  └──────────────────────────────────────────────────┘
   │
-  │  ATTEMPT 2 (receiveCount: 2)
+  │  If trigger itself crashes (rare):
   │  ┌──────────────────────────────────────────────────┐
-  │  │  step: validate-order     → SKIP (checkpoint)     │
-  │  │  step: reserve-inventory  → SKIP (checkpoint)     │
-  │  │  step: process-payment    → ██ OOM CRASH ██       │
+  │  │  ATTEMPT 2 → trigger crashes again                │
+  │  │  ATTEMPT 3 → trigger crashes again                │
+  │  │                                                   │
+  │  │  receiveCount (3) >= maxReceiveCount (3)          │
   │  └──────────────────────────────────────────────────┘
-  │
-  │  ATTEMPT 3 (receiveCount: 3)
-  │  ┌──────────────────────────────────────────────────┐
-  │  │  step: validate-order     → SKIP                  │
-  │  │  step: reserve-inventory  → SKIP                  │
-  │  │  step: process-payment    → ██ OOM CRASH ██       │
-  │  └──────────────────────────────────────────────────┘
-  │
-  │  receiveCount (3) >= maxReceiveCount (3)
   │
   v
   ┌──────────────────────────────────────────────────┐
@@ -294,9 +342,7 @@ survive across all attempts — completed steps are never re-executed.
   │                                                    │
   │  Message parked. 14-day retention.                 │
   │  CloudWatch alarm fires → engineer investigates.   │
-  │                                                    │
-  │  After fix: redrive from DLQ. Lambda replays,      │
-  │  SKIPS validate + reserve. Only payment runs.      │
+  │  After fix: redrive from DLQ.                      │
   └──────────────────────────────────────────────────┘
 ```
 
@@ -325,28 +371,29 @@ Three event types route to the inventory queue as commands:
                        │
                        v
               ┌─────────────────────────────────────────────┐
-              │  INVENTORY SERVICE (durable)                  │
+              │  trigger Lambda → StartExecution              │
+              └────────────────────┬──────────────────────────┘
+                                   │
+                                   v
+              ┌─────────────────────────────────────────────┐
+              │  INVENTORY WORKFLOW (Step Functions)          │
               │                                               │
-              │  Routes on detail-type:                       │
+              │  NormalizeInput (Pass) → Choice:              │
               │                                               │
-              │  OrderCreated ──> per-item reservation:       │
-              │    for each item:                             │
-              │      step: reserve-{sku}-{warehouse}          │
-              │        DDB: ADD quantity = -(ordered qty)     │
-              │      step: emit-adjusted-{sku}-{warehouse}    │
-              │        emit InventoryAdjusted (→ analytics)   │
+              │  OrderCreated ──> Map (per item):             │
+              │    ProcessItem (Lambda):                      │
+              │      idempotency check                       │
+              │      DDB: ADD quantity = -(ordered qty)      │
+              │      emit InventoryAdjusted (→ analytics)    │
               │      if qty < 10:                             │
-              │        step: emit-low-{sku}-{warehouse}       │
-              │          emit InventoryLow (→ notification)   │
+              │        emit InventoryLow (→ notification)    │
               │                                               │
               │  InventoryReceived / ReturnInitiated ──>      │
-              │    step: adjust-inventory                     │
+              │    ProcessItem (Lambda):                      │
               │      DDB: ADD quantity = +N                   │
-              │    step: emit-adjusted                        │
-              │      emit InventoryAdjusted (→ analytics)     │
-              │    if qty < 10:                               │
-              │      step: emit-low-stock                     │
-              │        emit InventoryLow (→ notification)     │
+              │      emit InventoryAdjusted (→ analytics)    │
+              │      if qty < 10:                             │
+              │        emit InventoryLow (→ notification)    │
               └─────────────────────────────────────────────┘
 ```
 
@@ -373,24 +420,24 @@ DynamoDB layout — one row per SKU per warehouse, atomic ADD operations:
   ┌─────────────────────────────────────────────────────────────────┐
   │                                                                 │
   │   Layer 1: APPLICATION LOGIC                                    │
-  │   try/catch + saga compensation                                 │
-  │   ├─ Payment declined? → release inventory, mark FAILED         │
-  │   ├─ Validation fails? → mark FAILED, emit OrderFailed          │
-  │   └─ Handles EXPECTED business failures gracefully              │
+  │   Step Functions Catch + compensation states                    │
+  │   ├─ Payment declined? → CompensateRelease → MarkFailed         │
+  │   ├─ Validation fails? → MarkFailedEarly                        │
+  │   └─ Handles EXPECTED business failures with visible state flow │
   │                                                                 │
   │   ┌─────────────────────────────────────────────────────────┐   │
   │   │                                                         │   │
-  │   │   Layer 2: DURABLE EXECUTION                            │   │
-  │   │   context.step() + checkpointing                        │   │
-  │   │   ├─ Timeout mid-saga? → replay from last checkpoint    │   │
-  │   │   ├─ Transient failure? → step retried, prior skipped   │   │
-  │   │   └─ Handles INFRASTRUCTURE failures within invocation  │   │
+  │   │   Layer 2: STEP FUNCTIONS ORCHESTRATION                 │   │
+  │   │   Per-state retry + execution history                   │   │
+  │   │   ├─ Transient failure? → retry 2x with backoff         │   │
+  │   │   ├─ All retries fail? → Catch → compensation states    │   │
+  │   │   └─ Handles INFRASTRUCTURE failures within execution   │   │
   │   │                                                         │   │
   │   │   ┌─────────────────────────────────────────────────┐   │   │
   │   │   │                                                 │   │   │
   │   │   │   Layer 3: SQS RETRY + DLQ                      │   │   │
   │   │   │   maxReceiveCount: 3 + dead letter queue         │   │   │
-  │   │   │   ├─ Lambda crashes? → SQS retries 3x            │   │   │
+  │   │   │   ├─ Trigger crashes? → SQS retries 3x             │   │   │
   │   │   │   ├─ All retries fail? → message goes to DLQ    │   │   │
   │   │   │   ├─ CloudWatch alarm fires                      │   │   │
   │   │   │   └─ Handles PERSISTENT failures, needs human    │   │   │

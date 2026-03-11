@@ -1,219 +1,268 @@
 # Inventory Service: All Flows
 
-## 4 Event Sources Feed the Inventory Queue
+## 3 Event Sources Feed the Inventory Queue
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
-  │  TrunkfulEventBus — Rule 2 (InventoryEventsToInventoryQueue)         │
+  │  TrunkfulEventBus                                                    │
+  │  Rule 2: InventoryEvents→InventoryQueue                             │
   │  Matches: OrderCreated | InventoryReceived | ReturnInitiated         │
+  │  (InventoryAdjusted deliberately EXCLUDED — see feedback loop below) │
   └────────────────────────────────┬─────────────────────────────────────┘
                                    │
             Who emits these?       │
-            ┌──────────────────────┼────────────────────────────────┐
-            │                      │                                │
-  ┌─────────┴──────────┐  ┌───────┴──────────┐  ┌──────────────────┴──────┐
-  │  INTAKE LAMBDAS    │  │  WAREHOUSE       │  │  INVENTORY SERVICE      │
-  │  (order-intake,    │  │  SCANNERS        │  │  ITSELF                 │
-  │   pos-intake,      │  │  (direct         │  │  (emits Inventory-      │
-  │   webhook-intake,  │  │   PutEvents      │  │   Adjusted after every  │
-  │   admin-ingest)    │  │   via IAM role)  │  │   DDB update)           │
-  │                    │  │                  │  │                          │
-  │  emit:             │  │  emit:           │  │  emit:                   │
-  │  OrderCreated      │  │  InventoryReceived│ │  InventoryAdjusted  ◄────── FEEDBACK
-  │                    │  │  ReturnInitiated  │  │  InventoryLow            │
-  └────────────────────┘  └──────────────────┘  └──────────────────────────┘
-            │                      │                        │
-            v                      v                        v
+            ┌──────────────────────┴────────────────────────┐
+            │                                               │
+  ┌─────────┴──────────┐                          ┌────────┴─────────┐
+  │  INTAKE LAMBDAS    │                          │  WAREHOUSE       │
+  │  (order-intake,    │                          │  SCANNERS        │
+  │   pos-intake,      │                          │  (direct         │
+  │   webhook-intake,  │                          │   PutEvents      │
+  │   admin-ingest)    │                          │   via IAM role)  │
+  │                    │                          │                  │
+  │  emit:             │                          │  emit:           │
+  │  OrderCreated      │                          │  InventoryReceived│
+  └─────────┬──────────┘                          │  ReturnInitiated │
+            │                                     └────────┬─────────┘
+            │                                              │
+            v  OrderCreated                                v  InventoryReceived / ReturnInitiated
   ┌──────────────────────────────────────────────────────────────────────┐
   │                      inventory-queue                                  │
   │                      (batchSize: 1)                                   │
   │                                                                       │
   │  ┌──────────────┐ ┌────────────────┐ ┌────────────────┐              │
-  │  │ OrderCreated │ │ Inventory-     │ │ Return-        │ ...          │
+  │  │ OrderCreated │ │ Inventory-     │ │ Return-        │              │
   │  │ Order #ABC   │ │ Received       │ │ Initiated      │              │
   │  │ 3 line items │ │ SKU-100 +500   │ │ SKU-200 +2     │              │
   │  └──────────────┘ └────────────────┘ └────────────────┘              │
   └──────────────────────────────┬────────────────────────────────────────┘
-                                 │
+                                 │ SQS message
                                  v
                     ┌────────────────────────┐
-                    │  INVENTORY SERVICE      │
-                    │  (durable execution)    │
-                    │                         │
-                    │  Routes on detail-type  │
-                    └────────────┬────────────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    │                         │
-                    v                         v
-             detail-type ==            detail-type ==
-             "OrderCreated"            anything else
-             (reservation flow)        (adjustment flow)
+                    │  trigger lambda          │
+                    │  Extracts EventBridge    │
+                    │  envelope, calls         │
+                    │  StartExecution          │
+                    └────────────┬─────────────┘
+                                 │ StartExecution
+                                 v
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  INVENTORY WORKFLOW  (Step Functions state machine)                   │
+  │                                                                       │
+  │  NormalizeInput (Pass)                                                │
+  │    ─ extracts detail-type → detailType, detail → detail              │
+  │         │                                                             │
+  │         v                                                             │
+  │  Choice: detailType == "OrderCreated"?                                │
+  │         │                          │                                  │
+  │         v YES                      v NO (otherwise)                   │
+  │  MapOrderItems (Map)         ExtractGenericDetail (Pass)             │
+  │    iterates detail.items       inputPath: $.detail                   │
+  │    ┌──────────────────┐            │                                  │
+  │    │ ProcessItem      │            v                                  │
+  │    │ Lambda (per item)│      ProcessGenericItem Lambda                │
+  │    └──────────────────┘                                               │
+  └──────────────────────────────────────────────────────────────────────┘
+
+  Inventory service emits after each DDB write (NOT routed back to queue):
+    InventoryAdjusted  → Rule 6: AllEvents→Firehose only
+    InventoryLow       → Rule 5: NotificationEvents→NotificationQueue
+                          + Rule 6: AllEvents→Firehose
 ```
 
-## Flow A: OrderCreated → Multi-Item Stock Reservation
+## Flow A: OrderCreated → Multi-Item Stock Reservation (Map State)
 
 ```
   OrderCreated event arrives with an order containing 3 items:
   { orderId: "ABC-123", items: [ SKU-100 x2, SKU-200 x1, SKU-300 x5 ] }
 
   ┌────────────────────────────────────────────────────────────────────┐
-  │  INVENTORY SERVICE — durable execution                             │
+  │  INVENTORY WORKFLOW — Step Functions                               │
   │                                                                    │
-  │  ┌─ ITEM 1: SKU-100 ────────────────────────────────────────────┐ │
-  │  │                                                               │ │
-  │  │  step: reserve-SKU100-DEFAULT                                 │ │
-  │  │    DDB: ADD quantity = -2                                     │ │
-  │  │    Key: pk=SKU#SKU-100, sk=WAREHOUSE#DEFAULT                  │ │
-  │  │    Returns: newQty = 48                                       │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  step: emit-adjusted-SKU100-DEFAULT                           │ │
-  │  │    emit InventoryAdjusted { sku: SKU-100, adjustedBy: -2,     │ │
-  │  │                             newQuantity: 48,                  │ │
-  │  │                             reason: "OrderCreated:ABC-123" }  │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  48 >= 10 → no InventoryLow                                  │ │
-  │  └───────────────────────────────────────────────────────────────┘ │
+  │  NormalizeInput (Pass state)                                       │
+  │    Extract detail-type → detailType, detail → detail               │
   │                                                                    │
-  │  ┌─ ITEM 2: SKU-200 ────────────────────────────────────────────┐ │
-  │  │                                                               │ │
-  │  │  step: reserve-SKU200-DEFAULT                                 │ │
-  │  │    DDB: ADD quantity = -1                                     │ │
-  │  │    Returns: newQty = 7                                        │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  step: emit-adjusted-SKU200-DEFAULT                           │ │
-  │  │    emit InventoryAdjusted                                     │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  7 < 10 → LOW STOCK!                                         │ │
-  │  │                                                               │ │
-  │  │  step: emit-low-SKU200-DEFAULT                                │ │
-  │  │    emit InventoryLow { sku: SKU-200, currentQuantity: 7,      │ │
-  │  │                        threshold: 10 }                        │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  └───────────────────────────────────────────────────────────────┘ │
+  │  Choice: detailType == "OrderCreated"? → YES                       │
   │                                                                    │
-  │  ┌─ ITEM 3: SKU-300 ────────────────────────────────────────────┐ │
-  │  │                                                               │ │
-  │  │  step: reserve-SKU300-DEFAULT                                 │ │
-  │  │    DDB: ADD quantity = -5                                     │ │
-  │  │    Returns: newQty = 120                                      │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  step: emit-adjusted-SKU300-DEFAULT                           │ │
-  │  │    emit InventoryAdjusted                                     │ │
-  │  │    CHECKPOINT ✓                                               │ │
-  │  │                                                               │ │
-  │  │  120 >= 10 → no InventoryLow                                 │ │
-  │  └───────────────────────────────────────────────────────────────┘ │
+  │  MapOrderItems (Map state, iterates $.detail.items)                │
+  │  ┌────────────────────────────────────────────────────────────────┐│
+  │  │  Each iteration receives:                                      ││
+  │  │  { sku, quantity, orderId, isReservation: true }               ││
+  │  │                                                                ││
+  │  │  ┌─ ITEM 1: SKU-100 ────────────────────────────────────────┐ ││
+  │  │  │  ProcessItem Lambda:                                      │ ││
+  │  │  │    Idempotency check: INV#ABC-123#SKU-100#DEFAULT         │ ││
+  │  │  │    DDB: ADD quantity = -2                                 │ ││
+  │  │  │    Key: pk=SKU#SKU-100, sk=WAREHOUSE#DEFAULT              │ ││
+  │  │  │    Returns: newQty = 48                                   │ ││
+  │  │  │    emit InventoryAdjusted { adjustedBy: -2, qty: 48 }     │ ││
+  │  │  │    48 >= 10 → no InventoryLow                             │ ││
+  │  │  └───────────────────────────────────────────────────────────┘ ││
+  │  │                                                                ││
+  │  │  ┌─ ITEM 2: SKU-200 ────────────────────────────────────────┐ ││
+  │  │  │  ProcessItem Lambda:                                      │ ││
+  │  │  │    Idempotency check: INV#ABC-123#SKU-200#DEFAULT         │ ││
+  │  │  │    DDB: ADD quantity = -1                                 │ ││
+  │  │  │    Returns: newQty = 7                                    │ ││
+  │  │  │    emit InventoryAdjusted                                 │ ││
+  │  │  │    7 < 10 → LOW STOCK!                                   │ ││
+  │  │  │    emit InventoryLow { sku: SKU-200, qty: 7 }            │ ││
+  │  │  └───────────────────────────────────────────────────────────┘ ││
+  │  │                                                                ││
+  │  │  ┌─ ITEM 3: SKU-300 ────────────────────────────────────────┐ ││
+  │  │  │  ProcessItem Lambda:                                      │ ││
+  │  │  │    Idempotency check: INV#ABC-123#SKU-300#DEFAULT         │ ││
+  │  │  │    DDB: ADD quantity = -5                                 │ ││
+  │  │  │    Returns: newQty = 120                                  │ ││
+  │  │  │    emit InventoryAdjusted                                 │ ││
+  │  │  │    120 >= 10 → no InventoryLow                            │ ││
+  │  │  └───────────────────────────────────────────────────────────┘ ││
+  │  └────────────────────────────────────────────────────────────────┘│
   │                                                                    │
-  │  return { orderId: "ABC-123", status: "reserved" }                 │
+  │  Execution succeeds                                                │
   └────────────────────────────────────────────────────────────────────┘
 
   Events emitted during this execution:
-  ┌─────────────────────┬─────────────────────────────────────────────┐
-  │ InventoryAdjusted   │  SKU-100, -2, qty=48  (→ Rule 6 only)     │
-  │ InventoryAdjusted   │  SKU-200, -1, qty=7   (→ Rule 6 only)     │
-  │ InventoryLow        │  SKU-200, qty=7       (→ Rule 5, Rule 6)  │
-  │ InventoryAdjusted   │  SKU-300, -5, qty=120 (→ Rule 6 only)     │
-  └─────────────────────┴─────────────────────────────────────────────┘
-  Note: InventoryAdjusted goes to Firehose only (analytics).
-  It is NOT routed back to the inventory queue (see feedback loop fix below).
+  ┌─────────────────────┬──────────────────────────────────────────────────────────┐
+  │ InventoryAdjusted   │  SKU-100, -2, qty=48                                    │
+  │                     │    → Rule 6: AllEvents→Firehose only                     │
+  │ InventoryAdjusted   │  SKU-200, -1, qty=7                                     │
+  │                     │    → Rule 6: AllEvents→Firehose only                     │
+  │ InventoryLow        │  SKU-200, qty=7                                          │
+  │                     │    → Rule 5: NotificationEvents→NotificationQueue        │
+  │                     │    → Rule 6: AllEvents→Firehose                          │
+  │ InventoryAdjusted   │  SKU-300, -5, qty=120                                   │
+  │                     │    → Rule 6: AllEvents→Firehose only                     │
+  └─────────────────────┴──────────────────────────────────────────────────────────┘
+  Note: InventoryAdjusted is NOT in Rule 2 (InventoryEvents→InventoryQueue).
+  It goes to Firehose only. See "Feedback Loop" section below.
+```
+
+## Idempotency: Safe Retries in Map State
+
+```
+  ╔════════════════════════════════════════════════════════════════════╗
+  ║  DESIGN NOTE: Why the ProcessItem Lambda has an idempotency check ║
+  ╚════════════════════════════════════════════════════════════════════╝
+
+  DynamoDB ADD operations are NOT idempotent — running the same
+  adjustment twice would double-count. If the Map state partially
+  succeeds (items 1-2 reserved) then fails on item 3, SQS retries
+  the message, starting a NEW state machine execution that re-processes
+  all items.
+
+  To prevent double-adjustment, each ProcessItem invocation writes
+  an idempotency key to the Idempotency table via a DynamoDB
+  conditional PutItem (attribute_not_exists) before adjusting:
+
+    Key: INV#{orderId}#{sku}#{warehouseId}
+    TTL: 24 hours
+
+  On retry:
+    Item 1 → idempotency key exists → SKIP (no double-decrement)
+    Item 2 → idempotency key exists → SKIP
+    Item 3 → idempotency key missing → RUNS (first successful attempt)
+
+  This provides replay safety using application-level idempotency
+  within the Step Functions Map state.
 ```
 
 ## Flow B: Warehouse Receive / Return / Generic Adjustment
 
 ```
-  Warehouse scanner sends InventoryReceived via direct PutEvents:
-  { sku: "SKU-200", warehouseId: "WH-EAST", quantity: 500 }
+  Warehouse scanner sends InventoryReceived via direct PutEvents
+  → Rule 2: InventoryEvents→InventoryQueue
+  → inventory-queue → trigger lambda → StartExecution
+
+  Payload: { sku: "SKU-200", warehouseId: "WH-EAST", quantity: 500 }
 
   ┌────────────────────────────────────────────────────────────────────┐
-  │  INVENTORY SERVICE — durable execution                             │
+  │  INVENTORY WORKFLOW — Step Functions state machine                  │
   │                                                                    │
-  │  detail-type != "OrderCreated" → generic adjustment path           │
+  │  NormalizeInput (Pass state)                                       │
+  │    Extract detail-type → detailType, detail → detail               │
   │                                                                    │
-  │  step: adjust-inventory                                            │
+  │  Choice: detailType == "OrderCreated"? → NO (otherwise)            │
+  │                                                                    │
+  │  ExtractGenericDetail (Pass state, inputPath: $.detail)            │
+  │    Passes { sku: "SKU-200", warehouseId: "WH-EAST", qty: 500 }    │
+  │                                                                    │
+  │  ProcessGenericItem (Lambda)                                       │
   │    DDB: ADD quantity = +500                                        │
   │    Key: pk=SKU#SKU-200, sk=WAREHOUSE#WH-EAST                      │
   │    Returns: newQty = 507                                           │
-  │    CHECKPOINT ✓                                                    │
+  │    emit InventoryAdjusted { adjustedBy: +500, newQuantity: 507 }   │
+  │    507 >= 10 → no InventoryLow                                     │
   │                                                                    │
-  │  step: emit-adjusted                                               │
-  │    emit InventoryAdjusted { sku: SKU-200, warehouseId: WH-EAST,   │
-  │                             adjustedBy: +500, newQuantity: 507 }   │
-  │    CHECKPOINT ✓                                                    │
-  │                                                                    │
-  │  507 >= 10 → no InventoryLow                                      │
-  │                                                                    │
-  │  return { sku: "SKU-200", newQuantity: 507 }                       │
+  │  Execution succeeds: { sku: "SKU-200", newQuantity: 507 }          │
   └────────────────────────────────────────────────────────────────────┘
 ```
 
 ## The Feedback Loop (and how we prevent it)
 
 ```
-  ╔════════════════════════════════════════════════════════════════════╗
-  ║  DESIGN NOTE: Why InventoryAdjusted is NOT in Rule 2              ║
-  ╚════════════════════════════════════════════════════════════════════╝
+  ╔═══════════════════════════════════════════════════════════════════════════╗
+  ║  DESIGN NOTE: Why InventoryAdjusted is NOT in                            ║
+  ║  Rule 2: InventoryEvents→InventoryQueue                                  ║
+  ╚═══════════════════════════════════════════════════════════════════════════╝
 
   The inventory service emits InventoryAdjusted after every DDB write.
   If Rule 2 matched InventoryAdjusted, the event would route back into
   the inventory queue and create an infinite loop:
 
-  OrderCreated ──> inventory-queue ──> inventory service
-                                            │
-                                            ├─ DDB: reserve stock
-                                            │
-                                            └─ emit InventoryAdjusted ─────┐
-                                                                           │
-       ┌───────────────────────────────────────────────────────────────────┘
+  OrderCreated ──> inventory-queue ──> trigger lambda ──> Step Functions
+                                                               │
+                                                               ├─ DDB: reserve stock
+                                                               │
+                                                               └─ emit InventoryAdjusted ──┐
+                                                                                           │
+       ┌───────────────────────────────────────────────────────────────────────────────────┘
        │
        v
-  EventBridge Rule 2 matches InventoryAdjusted       ← WOULD re-enter
+  Rule 2 (InventoryEvents→InventoryQueue)
+  matches InventoryAdjusted  ← WOULD re-enter
        │
        v
-  inventory-queue ──> inventory service
-                           │
-                           │  step: adjust-inventory
-                           │    DDB: ADD quantity = adjustedBy
-                           │    DOUBLE-COUNT! Re-applies same delta.
-                           │
-                           │  step: emit-adjusted → InventoryAdjusted
-                           │    → matches Rule 2 again → INFINITE LOOP ∞
+  inventory-queue ──> trigger lambda ──> Step Functions
+                                              │
+                                              │  ProcessItem Lambda
+                                              │    DDB: ADD quantity = adjustedBy
+                                              │    DOUBLE-COUNT! Re-applies same delta.
+                                              │
+                                              │  emit InventoryAdjusted
+                                              │    → matches Rule 2 again → INFINITE LOOP
 
-  ╔════════════════════════════════════════════════════════════════════╗
-  ║                                                                    ║
-  ║  FIX (applied): InventoryAdjusted removed from Rule 2.            ║
-  ║                                                                    ║
-  ║  Rule 2 matches ONLY command events:                               ║
-  ║    OrderCreated | InventoryReceived | ReturnInitiated              ║
-  ║                                                                    ║
-  ║  InventoryAdjusted is a NOTIFICATION ("this happened"), not a      ║
-  ║  COMMAND ("do this"). It flows only to Rule 6 (Firehose/analytics).║
-  ║                                                                    ║
-  ╚════════════════════════════════════════════════════════════════════╝
+  ╔═══════════════════════════════════════════════════════════════════════════╗
+  ║                                                                          ║
+  ║  FIX (applied): InventoryAdjusted excluded from                          ║
+  ║  Rule 2: InventoryEvents→InventoryQueue.                                ║
+  ║                                                                          ║
+  ║  Rule 2 matches ONLY command events:                                     ║
+  ║    OrderCreated | InventoryReceived | ReturnInitiated                    ║
+  ║                                                                          ║
+  ║  InventoryAdjusted is a NOTIFICATION ("this happened"), not a            ║
+  ║  COMMAND ("do this"). It flows only to                                   ║
+  ║  Rule 6: AllEvents→Firehose.                                            ║
+  ║                                                                          ║
+  ╚═══════════════════════════════════════════════════════════════════════════╝
 
   Correct flow after fix:
 
-  OrderCreated ──> inventory-queue ──> inventory service
-                                            │
-                                            ├─ DDB: reserve stock
-                                            │
-                                            └─ emit InventoryAdjusted ─────┐
-                                                                           │
-                                                              Rule 2: NO MATCH
-                                                              Rule 6: MATCH
-                                                                           │
-                                                                           v
-                                                                    ┌───────────┐
-                                                                    │ Firehose  │
-                                                                    │ → S3      │
-                                                                    │ (analytics│
-                                                                    │  only)    │
-                                                                    └───────────┘
+  OrderCreated ──> inventory-queue ──> trigger lambda ──> Step Functions
+                                                               │
+                                                               ├─ DDB: reserve stock
+                                                               │
+                                                               └─ emit InventoryAdjusted ──┐
+                                                                                           │
+                                       Rule 2 (InventoryEvents→InventoryQueue): NO MATCH   │
+                                       Rule 6 (AllEvents→Firehose):              MATCH ◄───┘
+                                                                                  │
+                                                                                  v
+                                                                           ┌───────────┐
+                                                                           │ Firehose  │
+                                                                           │ → S3      │
+                                                                           │(analytics)│
+                                                                           └───────────┘
 ```
 
 ## DynamoDB Inventory Table: Multi-Warehouse Layout
@@ -241,59 +290,6 @@
   - ReturnValues: ALL_NEW     → get new quantity in same round-trip for threshold check
 ```
 
-## Durable Replay: Crash Mid-Order with 3 Items
-
-```
-  Order with 3 items, Lambda crashes after item 2:
-
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  INVOCATION 1                                                     │
-  │                                                                   │
-  │  Item 1: SKU-100                                                  │
-  │    step: reserve-SKU100-DEFAULT  → DDB -2  → CHECKPOINT ✓        │
-  │    step: emit-adjusted-SKU100    → emitted  → CHECKPOINT ✓        │
-  │                                                                   │
-  │  Item 2: SKU-200                                                  │
-  │    step: reserve-SKU200-DEFAULT  → DDB -1  → CHECKPOINT ✓        │
-  │    step: emit-adjusted-SKU200    → emitted  → CHECKPOINT ✓        │
-  │    step: emit-low-SKU200         → emitted  → CHECKPOINT ✓        │
-  │                                                                   │
-  │  Item 3: SKU-300                                                  │
-  │    step: reserve-SKU300-DEFAULT  → ██ LAMBDA OOM CRASH ██        │
-  │                                                                   │
-  └──────────────────────────────────────────────────────────────────┘
-
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  INVOCATION 2 (replay)                                            │
-  │                                                                   │
-  │  Item 1: SKU-100                                                  │
-  │    step: reserve-SKU100-DEFAULT  → SKIP (checkpoint: qty=48)      │
-  │    step: emit-adjusted-SKU100    → SKIP (checkpoint: emitted)     │
-  │                                    ^^^^                           │
-  │                          NOT re-emitted. No duplicate event.      │
-  │                          NOT re-decremented. Stock stays at 48.   │
-  │                                                                   │
-  │  Item 2: SKU-200                                                  │
-  │    step: reserve-SKU200-DEFAULT  → SKIP (checkpoint: qty=7)       │
-  │    step: emit-adjusted-SKU200    → SKIP                           │
-  │    step: emit-low-SKU200         → SKIP                           │
-  │                                                                   │
-  │  Item 3: SKU-300                                                  │
-  │    step: reserve-SKU300-DEFAULT  → RUNS (no checkpoint)           │
-  │                                    DDB -5, newQty = 120           │
-  │                                    CHECKPOINT ✓                   │
-  │    step: emit-adjusted-SKU300    → RUNS                           │
-  │                                    CHECKPOINT ✓                   │
-  │                                                                   │
-  │  return { orderId: "ABC-123", status: "reserved" }                │
-  └──────────────────────────────────────────────────────────────────┘
-
-  WITHOUT durable execution, invocation 2 would have:
-  - Decremented SKU-100 AGAIN (double-reserved, stock 46 instead of 48)
-  - Emitted InventoryAdjusted AGAIN (duplicate events downstream)
-  - Sent ANOTHER InventoryLow for SKU-200 (duplicate alert)
-```
-
 ## Full Lifecycle: All Inventory Mutations
 
 ```
@@ -307,7 +303,7 @@
   Received       Created        Release-       Initiated      Adjusted
   qty: +500      qty: -N        Requested      qty: +N        qty: +/-N
        │              │         (from order     │              │
-       │              │          service         │              │
+       │              │          saga            │              │
        │              │          compensation)   │              │
        v              v              v           v              v
   ┌──────────────────────────────────────────────────────────────────┐
@@ -326,11 +322,39 @@
                     if qty < 10        if qty >= 10
                          │                  │
                          v                  v
-                  ┌─────────────┐    (no alert)
-                  │InventoryLow │
-                  │ → Rule 5    │
-                  │ → notif-    │
-                  │   ication   │
-                  │   queue     │
-                  └─────────────┘
+                  ┌───────────────────────────────────────┐  (no alert)
+                  │ InventoryLow                          │
+                  │  → Rule 5: NotificationEvents→        │
+                  │    NotificationQueue                   │
+                  │  → Rule 6: AllEvents→Firehose          │
+                  └───────────────────────────────────────┘
+```
+
+## EventBridge Rule Reference
+
+```
+  Rule 1: OrderCreated→OrderQueue
+    Matches: OrderCreated
+    Target:  order-queue
+
+  Rule 2: InventoryEvents→InventoryQueue
+    Matches: OrderCreated | InventoryReceived | ReturnInitiated
+    Target:  inventory-queue
+    NOTE:    InventoryAdjusted deliberately excluded (feedback loop)
+
+  Rule 3: OrderConfirmed→BillingQueue
+    Matches: OrderConfirmed
+    Target:  billing-queue
+
+  Rule 4: OrderConfirmed→FulfillmentQueue
+    Matches: OrderConfirmed
+    Target:  fulfillment-queue
+
+  Rule 5: NotificationEvents→NotificationQueue
+    Matches: OrderConfirmed | OrderFailed | InventoryLow
+    Target:  notification-queue
+
+  Rule 6: AllEvents→Firehose
+    Matches: all events on TrunkfulEventBus (source: trunkful.orders)
+    Target:  Kinesis Firehose → S3 (analytics)
 ```

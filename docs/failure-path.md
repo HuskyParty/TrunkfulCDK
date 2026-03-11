@@ -1,59 +1,61 @@
 # Failure Path: Payment Fails → Compensation → DLQ Escalation
 
-## Scenario 1: Payment Declined (handled gracefully)
+## Scenario 1: Payment Declined (handled by Step Functions Catch)
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
-  │  ORDER SERVICE (durable)                                         │
+  │  ORDER SAGA (Step Functions)                                     │
   │                                                                  │
-  │  step: validate-order                                            │
+  │  ValidateOrder (Lambda)                                          │
   │    ├─ validate fields ─── OK                                     │
   │    ├─ DDB → VALIDATING                                           │
-  │    ├─ emit OrderValidated                                        │
-  │    └─ CHECKPOINT ✓                                               │
-  │                                                                  │
-  │  step: reserve-inventory                                         │
+  │    └─ emit OrderValidated                                        │
+  │         │                                                        │
+  │         v                                                        │
+  │  ReserveInventory (Lambda)                                       │
   │    ├─ DDB → RESERVED                                             │
-  │    ├─ emit OrderReserved                                         │
-  │    └─ CHECKPOINT ✓                                               │
-  │                                                                  │
-  │  step: process-payment                                           │
+  │    └─ emit OrderReserved                                         │
+  │         │                                                        │
+  │         v                                                        │
+  │  ProcessPayment (Lambda)                                         │
   │    ├─ circuit breaker: CLOSED                                    │
   │    ├─ processPayment() ─── DECLINED                              │
   │    ├─ recordFailure('payment')                                   │
   │    └─ THROWS Error('Payment declined')                           │
   │         │                                                        │
-  │         v                                                        │
+  │         v  ──── Step Functions Catch fires ────                   │
+  │                                                                  │
   │  ┌─────────────────────────────────────────────┐                 │
-  │  │  COMPENSATION (try/catch in handler)         │                 │
-  │  │                                              │                 │
-  │  │  1. emit InventoryReleaseRequested           │                 │
-  │  │     └─ inventory service releases hold       │                 │
-  │  │                                              │                 │
-  │  │  2. DDB → FAILED                             │                 │
-  │  │                                              │                 │
-  │  │  3. emit OrderFailed ──────────────────────────────────────┐  │
-  │  │     └─ reason: "Payment declined"            │             │  │
-  │  └─────────────────────────────────────────────┘             │  │
-  │                                                               │  │
-  │  return { orderId, status: 'FAILED' }  ← handler succeeds    │  │
-  │  SQS message DELETED (no retry needed)                        │  │
-  └───────────────────────────────────────────────────────────────┘  │
-                                                                     │
-                OrderFailed event                                    │
-                matches Rule 5 + Rule 6                              │
-                ┌────────────────────┐                               │
-                │                    │                               │
-                v                    v                               │
-         ┌────────────┐      ┌───────────┐                          │
-         │notification│      │ Firehose  │                          │
-         │-queue      │      │ → S3      │                          │
-         └─────┬──────┘      └───────────┘                          │
-               │                                                     │
-               v                                                     │
-         ┌────────────────┐                                          │
-         │  NOTIFICATION  │                                          │
-         │  LAMBDA        │                                          │
+  │  │  CompensateRelease (Lambda)                  │                 │
+  │  │    └─ emit InventoryReleaseRequested         │                 │
+  │  └────────────────────┬────────────────────────┘                 │
+  │                       │                                          │
+  │                       v                                          │
+  │  ┌─────────────────────────────────────────────┐                 │
+  │  │  MarkFailedAfterComp (Lambda)                │                 │
+  │  │    ├─ DDB → FAILED                           │                 │
+  │  │    └─ emit OrderFailed ──────────────────────────────────┐    │
+  │  └─────────────────────────────────────────────┘            │    │
+  │                                                              │    │
+  │  State machine execution completes (compensation ran).       │    │
+  │  SQS message DELETED (trigger Lambda succeeded).             │    │
+  └──────────────────────────────────────────────────────────────┘    │
+                                                                      │
+                OrderFailed event                                     │
+                matches Rule 5: NotificationEvents→NotificationQueue        │
+                      + Rule 6: AllEvents→Firehose                          │
+                ┌────────────────────┐                                │
+                │                    │                                │
+                v                    v                                │
+         ┌────────────┐      ┌───────────┐                           │
+         │notification│      │ Firehose  │                           │
+         │-queue      │      │ → S3      │                           │
+         └─────┬──────┘      └───────────┘                           │
+               │                                                      │
+               v                                                      │
+         ┌────────────────┐                                           │
+         │  NOTIFICATION  │                                           │
+         │  LAMBDA        │
          │                │
          │  "Sorry, your  │
          │   order could  │
@@ -87,8 +89,10 @@
                                                           │
                                                           v
   Order #6  checkCircuit() → OPEN → immediate throw, no call made
+            Step Functions Catch → CompensateRelease → MarkFailed
   Order #7  checkCircuit() → OPEN → immediate throw, no call made
-  ...       (all orders fail-fast with compensation)
+            (fail-fast with compensation)
+  ...
 
             ── 30 seconds pass ──
 
@@ -96,7 +100,7 @@
             payment call → success → recordSuccess() → CIRCUIT CLOSES
 ```
 
-## Scenario 3: Unhandled Crash → SQS Retry → DLQ
+## Scenario 3: Trigger Lambda Crash → SQS Retry → DLQ
 
 ```
   ┌───────────────────────────────────────────────────────────────────────┐
@@ -112,89 +116,43 @@
       ═══════════════════════╪══════════════════════════════════════
                              v
          ┌──────────────────────────────────────────────────┐
-         │  ORDER SERVICE (durable)                          │
+         │  Trigger Lambda → StartExecution                  │
          │                                                   │
-         │  step: validate-order     → CHECKPOINT ✓          │
-         │  step: reserve-inventory  → CHECKPOINT ✓          │
-         │  step: process-payment    → Lambda OOM KILLED     │
-         │                              (128MB not enough)   │
+         │  State Machine runs:                              │
+         │    ValidateOrder     → OK                         │
+         │    ReserveInventory  → OK                         │
+         │    ProcessPayment    → THROWS (service down)      │
+         │    Catch → CompensateRelease → MarkFailed         │
          │                                                   │
-         │  ╔═════════════════════════════════════════════╗   │
-         │  ║  UNHANDLED: Lambda runtime killed process   ║   │
-         │  ║  No catch block reached                     ║   │
-         │  ║  SQS never gets deleteMessage               ║   │
-         │  ║  visibilityTimeout expires (60s)            ║   │
-         │  ╚═════════════════════════════════════════════╝   │
+         │  SM completes with compensation.                   │
+         │  Trigger Lambda succeeds. SQS message DELETED.    │
+         │  No SQS retry needed.                             │
          └──────────────────────────────────────────────────┘
 
-      ═══════════════════════╪══════════════════════════════════════
-      ATTEMPT 2              │         receiveCount: 2
-      ═══════════════════════╪══════════════════════════════════════
-                             v
-         ┌──────────────────────────────────────────────────┐
-         │  ORDER SERVICE (durable) — REPLAY                 │
-         │                                                   │
-         │  step: validate-order     → SKIP (checkpoint hit) │
-         │  step: reserve-inventory  → SKIP (checkpoint hit) │
-         │  step: process-payment    → Lambda OOM KILLED     │
-         │                              (same bug)           │
-         └──────────────────────────────────────────────────┘
+  Note: If the trigger Lambda itself crashes (e.g. OOM before
+  calling StartExecution), SQS retries up to 3 times, then DLQ.
 
       ═══════════════════════╪══════════════════════════════════════
-      ATTEMPT 3 (final)      │         receiveCount: 3
+      If trigger crashes:    │    receiveCount increments
       ═══════════════════════╪══════════════════════════════════════
-                             v
-         ┌──────────────────────────────────────────────────┐
-         │  ORDER SERVICE (durable) — REPLAY                 │
-         │                                                   │
-         │  step: validate-order     → SKIP (checkpoint hit) │
-         │  step: reserve-inventory  → SKIP (checkpoint hit) │
-         │  step: process-payment    → Lambda OOM KILLED     │
-         │                              (same bug)           │
-         └──────────────────────────────────────────────────┘
-
-      ═══════════════════════╪══════════════════════════════════════
-      receiveCount (3) >=    │    maxReceiveCount (3)
-      ═══════════════════════╪══════════════════════════════════════
+                             │
+               After 3 failed attempts:
                              │
                              v
          ┌──────────────────────────────────────────────────┐
          │  SQS: order-dlq  (Dead Letter Queue)              │
          │                                                   │
-         │  ┌─────────────────────────────────────────────┐  │
-         │  │  Message: Order #XYZ-999                     │  │
-         │  │  Original queue: order-queue                 │  │
-         │  │  receiveCount at death: 3                    │  │
-         │  │  First received: 2026-03-09T10:00:00Z        │  │
-         │  │  Retention: 14 days                          │  │
-         │  └─────────────────────────────────────────────┘  │
-         │                                                   │
-         └──────────────────────────┬────────────────────────┘
-                                    │
-                          ┌─────────┘
-                          v
-         ┌──────────────────────────────────────────────────┐
-         │  CloudWatch Alarm: OrderDlqAlarm                  │
-         │                                                   │
-         │  ApproximateNumberOfMessagesVisible > 0           │
-         │  ──────────────────────────────────               │
-         │  ALARM STATE                                      │
-         │                                                   │
-         │  → SNS notification to on-call engineer           │
-         │  → Dashboard widget turns red                     │
-         │  → Engineer inspects DLQ message, finds OOM       │
-         │  → Increases Lambda memory, redrives message      │
+         │  Message parked. 14-day retention.                │
+         │  CloudWatch alarm fires → engineer investigates.  │
+         │  After fix: redrive from DLQ.                     │
          └──────────────────────────────────────────────────┘
-
-
-  ════════════════════════════════════════════════════════════════════
-  KEY INSIGHT: Durable checkpoints survived all 3 attempts.
-  After the engineer fixes the OOM bug and redrives from DLQ,
-  the Lambda replays and SKIPS validate + reserve (already done).
-  Only the payment step runs, saving time and preventing
-  double-reservation.
-  ════════════════════════════════════════════════════════════════════
 ```
+
+**Key insight:** Step Functions handles saga failures **within a single
+execution**. The Catch states run compensation inline -- there is no need
+for SQS retries for business-level failures like payment decline. SQS
+retries only fire if the trigger Lambda itself crashes before calling
+StartExecution.
 
 ## Summary: Three Layers of Resilience
 
@@ -202,24 +160,25 @@
   ┌─────────────────────────────────────────────────────────────────┐
   │                                                                 │
   │   Layer 1: APPLICATION LOGIC                                    │
-  │   try/catch + saga compensation                                 │
-  │   ├─ Payment declined? → release inventory, mark FAILED         │
-  │   ├─ Validation fails? → mark FAILED, emit OrderFailed          │
-  │   └─ Handles EXPECTED business failures gracefully              │
+  │   Step Functions Catch + compensation states                    │
+  │   ├─ Payment declined? → CompensateRelease → MarkFailed         │
+  │   ├─ Validation fails? → MarkFailedEarly                        │
+  │   └─ Handles EXPECTED business failures with visible state flow │
   │                                                                 │
   │   ┌─────────────────────────────────────────────────────────┐   │
   │   │                                                         │   │
-  │   │   Layer 2: DURABLE EXECUTION                            │   │
-  │   │   context.step() + checkpointing                        │   │
-  │   │   ├─ Timeout mid-saga? → replay from last checkpoint    │   │
-  │   │   ├─ Transient failure? → step retried, prior skipped   │   │
-  │   │   └─ Handles INFRASTRUCTURE failures within invocation  │   │
+  │   │   Layer 2: STEP FUNCTIONS ORCHESTRATION                 │   │
+  │   │   Per-state retry + execution history                   │   │
+  │   │   ├─ Transient failure? → retry 2x with backoff         │   │
+  │   │   ├─ All retries fail? → Catch → compensation states    │   │
+  │   │   ├─ Visual execution history for debugging             │   │
+  │   │   └─ Handles INFRASTRUCTURE failures within execution   │   │
   │   │                                                         │   │
   │   │   ┌─────────────────────────────────────────────────┐   │   │
   │   │   │                                                 │   │   │
   │   │   │   Layer 3: SQS RETRY + DLQ                      │   │   │
   │   │   │   maxReceiveCount: 3 + dead letter queue         │   │   │
-  │   │   │   ├─ Lambda crashes? → SQS retries 3x            │   │   │
+  │   │   │   ├─ Trigger Lambda crashes? → SQS retries 3x   │   │   │
   │   │   │   ├─ All retries fail? → message goes to DLQ    │   │   │
   │   │   │   ├─ CloudWatch alarm fires                      │   │   │
   │   │   │   └─ Handles PERSISTENT failures, needs human    │   │   │

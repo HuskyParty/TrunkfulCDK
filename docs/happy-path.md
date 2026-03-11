@@ -4,79 +4,92 @@
   CUSTOMER                    INGESTION                         EVENT BUS
   ════════                    ═════════                         ═════════
 
-  ┌──────────┐   POST /orders   ┌──────────────┐   PutEvents   ┌─────────────────┐
-  │  Web /   │─────────────────>│ order-intake  │─────────────>│ TrunkfulEventBus │
-  │  Mobile  │   (Cognito auth) │   Lambda      │              │                  │
-  └──────────┘                  └──────┬───────┘              └────────┬──────────┘
-                                       │                               │
-                          ┌────────────┘                               │
-                          v                                            │
-                   ┌─────────────┐                                     │
-                   │  DynamoDB   │                                     │
-                   │  Orders     │                                     │
-                   │             │                                     │
-                   │  status:    │           ┌──────────────────────────┘
-                   │  PENDING    │           │
-                   └─────────────┘           │  OrderCreated event
-                                             │  matches Rule 1 + Rule 2 + Rule 6
-                          ┌──────────────────┼──────────────────┐
-                          │                  │                  │
-                          v                  v                  v
-                   ┌────────────┐    ┌─────────────┐    ┌───────────┐
-                   │order-queue │    │inventory-   │    │ Firehose  │
-                   │            │    │queue        │    │ → S3      │
-                   └─────┬──────┘    └──────┬──────┘    └───────────┘
-                         │                  │
-                         v                  v
-  ┌──────────────────────────────┐  ┌────────────────────────────┐
-  │  ORDER SERVICE (durable)     │  │  INVENTORY SERVICE (durable)│
-  │                              │  │                             │
-  │  step: validate-order        │  │  For each item in order:   │
-  │    ├─ validate fields        │  │    step: reserve-SKU-WH    │
-  │    ├─ DDB → VALIDATING       │  │      ├─ DDB ADD qty: -N   │
-  │    └─ emit OrderValidated    │  │      └─ emit Inventory-   │
-  │                              │  │           Adjusted         │
-  │  step: reserve-inventory     │  │                             │
-  │    ├─ DDB → RESERVED         │  │    (if qty < 10)           │
-  │    └─ emit OrderReserved     │  │      └─ emit InventoryLow │
-  │                              │  │                             │
-  │  step: process-payment       │  └────────────────────────────┘
-  │    ├─ circuit breaker: CLOSED│
-  │    ├─ processPayment() → OK  │
-  │    └─ recordSuccess()        │
-  │                              │
-  │  step: confirm-order         │
-  │    ├─ DDB → CONFIRMED        │
-  │    └─ emit OrderConfirmed ───────────────────────────────────────┐
-  │                              │                                   │
-  └──────────────────────────────┘                                   │
-                                                                     │
-               OrderConfirmed event                                  │
-               matches Rule 3 + Rule 4 + Rule 5 + Rule 6            │
-               ┌───────────────────┬───────────────────┐             │
-               │                   │                   │             │
-               v                   v                   v             v
-        ┌────────────┐     ┌─────────────┐     ┌────────────┐  ┌─────────┐
-        │billing-    │     │fulfillment- │     │notification│  │Firehose │
-        │queue       │     │queue        │     │-queue      │  │→ S3     │
-        └─────┬──────┘     └──────┬──────┘     └─────┬──────┘  └─────────┘
-              │                   │                   │
-              v                   v                   v
-        ┌───────────┐     ┌─────────────┐     ┌────────────────┐
-        │  BILLING  │     │ FULFILLMENT │     │  NOTIFICATION  │
-        │  LAMBDA   │     │  LAMBDA     │     │  LAMBDA        │
-        │           │     │             │     │                │
-        │  Generate │     │  Initiate   │     │  Send confirm  │
-        │  invoice  │     │  shipping   │     │  email (SES)   │
-        └───────────┘     └─────────────┘     └────────────────┘
+  ┌──────────┐   POST /orders   ┌──────────────┐                ┌─────────────────┐
+  │  Web /   │─────────────────>│ order-intake  │──PutEvents───>│ TrunkfulEventBus │
+  │  Mobile  │   (Cognito auth) │   Lambda      │ (OrderCreated)│                  │
+  └──────────┘                  └──────┬───────┘               └────────┬──────────┘
+                                      │                                │
+                         ┌────────────┘                                │
+                         │ DDB PutItem                                 │
+                         v (status: PENDING)                           │
+                  ┌─────────────┐                                      │
+                  │  DynamoDB   │                                      │
+                  │  Orders     │  OrderCreated event matches:         │
+                  │             │    Rule 1: OrderCreated→OrderQueue   │
+                  │             │    Rule 2: InventoryEvents→InventoryQueue │
+                  │  status:    │    Rule 6: AllEvents→Firehose        │
+                  │  PENDING    │                                      │
+                  └─────────────┘                                      │
+                                  ┌────────────────────────────────────┤
+                                  │                                    │
+                                  │ Rule 1: OrderCreated→OrderQueue   │ Rule 2: InventoryEvents→InventoryQueue
+                                  v                                    v
+                           ┌────────────┐                    ┌─────────────┐
+                           │order-queue │                    │inventory-   │
+                           │   (SQS)    │                    │queue (SQS)  │
+                           └─────┬──────┘                    └──────┬──────┘
+                                 │ SQS poll                         │ SQS poll
+                                 v                                  v
+                           ┌────────────┐                    ┌─────────────┐
+                           │ order-saga │                    │ inventory-  │
+                           │ trigger λ  │                    │ workflow    │
+                           └─────┬──────┘                    │ trigger λ   │
+                                 │                           └──────┬──────┘
+                                 │ StartExecution                   │ StartExecution
+                                 v                                  v
+  ┌──────────────────────────────────────────┐  ┌─────────────────────────────────────┐
+  │  Order Saga SM (Step Functions)          │  │  Inventory Workflow SM (Step Fns)   │
+  │                                          │  │                                     │
+  │  ValidateOrder (Lambda)                  │  │  NormalizeInput (Pass)              │
+  │    ├─ validate fields                    │  │       │                             │
+  │    ├─ DDB UpdateItem → VALIDATING        │  │       v                             │
+  │    └─ PutEvents → OrderValidated         │  │  Choice: detailType?               │
+  │                                          │  │    ┌──────────┬──────────┐          │
+  │  ReserveInventory (Lambda)               │  │    │ OrderCreated        │ otherwise │
+  │    ├─ DDB UpdateItem → RESERVED          │  │    v                    v           │
+  │    └─ PutEvents → OrderReserved          │  │  Map (per item):    ExtractDetail  │
+  │                                          │  │    ProcessItem λ     (Pass)        │
+  │  ProcessPayment (Lambda)                 │  │      ├─ DDB ADD        │           │
+  │    ├─ checkCircuit('payment') → CLOSED   │  │      │  qty: -N        v           │
+  │    ├─ processPayment() → OK             │  │      ├─ PutEvents → ProcessItem λ  │
+  │    └─ recordSuccess('payment')           │  │      │  InventoryAdjusted          │
+  │                                          │  │      └─ (if qty < 10)              │
+  │  ConfirmOrder (Lambda)                   │  │         PutEvents →                │
+  │    ├─ DDB UpdateItem → CONFIRMED         │  │         InventoryLow               │
+  │    └─ PutEvents → OrderConfirmed ──────────────────────────────────────────────┐ │
+  │                                          │  └─────────────────────────────────────┘
+  └──────────────────────────────────────────┘                                     │
+                                                                                   │
+    OrderConfirmed ──> EventBridge ──> matches:                                    │
+      Rule 3: OrderConfirmed→BillingQueue                                          │
+      Rule 4: OrderConfirmed→FulfillmentQueue                                      │
+      Rule 5: NotificationEvents→NotificationQueue                                 │
+      Rule 6: AllEvents→Firehose                                                   │
+                                                                                   │
+         ┌──────────────────┬──────────────────┬──────────────────┐                │
+         │ Rule 3           │ Rule 4           │ Rule 5           │ Rule 6         │
+         v                  v                  v                  v                 │
+  ┌────────────┐     ┌─────────────┐    ┌────────────┐    ┌─────────┐              │
+  │billing-    │     │fulfillment- │    │notification│    │Firehose │──────────────┘
+  │queue (SQS) │     │queue (SQS)  │    │-queue (SQS)│    │→ S3     │
+  └─────┬──────┘     └──────┬──────┘    └─────┬──────┘    └─────────┘
+        │ SQS poll          │ SQS poll        │ SQS poll
+        v                   v                  v
+  ┌───────────┐     ┌─────────────┐     ┌────────────────┐
+  │  BILLING  │     │ FULFILLMENT │     │  NOTIFICATION  │
+  │  LAMBDA   │     │  LAMBDA     │     │  LAMBDA        │
+  │           │     │             │     │                │
+  │  Generate │     │  Initiate   │     │  Send confirm  │
+  │  invoice  │     │  shipping   │     │  email (SES)   │
+  └───────────┘     └─────────────┘     └────────────────┘
 
 
   ════════════════════════════════════════════════════════════════════════
-  ORDER STATUS TIMELINE (DynamoDB)
+  ORDER STATUS TIMELINE (DynamoDB UpdateItem at each step)
   ════════════════════════════════════════════════════════════════════════
 
   PENDING ──> VALIDATING ──> RESERVED ──> CONFIRMED
      │            │              │             │
-   intake      order svc      order svc     order svc
-   lambda      step 1         step 2        step 4
+   intake      Step Fn        Step Fn       Step Fn
+   lambda      ValidateOrder  ReserveInv.   ConfirmOrder
 ```
