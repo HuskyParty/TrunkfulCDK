@@ -6,3 +6,9 @@ node_modules
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+
+# Docs source files
+docs/Project3_prettier.pdf
+docs/Project3_prettier-2.docx
+docs/Project3_prettier.md
+docs/reqs.md

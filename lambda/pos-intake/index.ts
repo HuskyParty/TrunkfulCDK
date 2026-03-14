@@ -14,16 +14,19 @@ const ddb = new DynamoDBClient({});
 export const handler = async (event: any) => {
   try {
     const deviceId = event.deviceId;
-    const orderId = randomUUID();
     const channel: Channel = 'pos';
     const createdAt = new Date().toISOString();
 
-    logger.info('POS intake received', { orderId, deviceId, channel });
+    // Derive a stable idempotency key from the message or device+timestamp
+    const idempKey: string = event.messageId ?? `${event.deviceId ?? ''}:${event.timestamp ?? ''}`;
 
-    // Idempotency check
-    const isNew = await checkIdempotency(orderId, orderId);
+    logger.info('POS intake received', { idempKey, deviceId, channel });
+
+    // Generate orderId then run idempotency check
+    const orderId = randomUUID();
+    const isNew = await checkIdempotency(idempKey, orderId);
     if (!isNew) {
-      logger.warn('Duplicate POS order detected', { orderId, deviceId });
+      logger.warn('Duplicate POS order detected', { idempKey, deviceId });
       return { statusCode: 200 };
     }
 

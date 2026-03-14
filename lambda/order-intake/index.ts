@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import {
   DynamoDBClient,
   PutItemCommand,
@@ -14,20 +14,27 @@ const ddb = new DynamoDBClient({});
 export const handler = async (event: any) => {
   try {
     const body = JSON.parse(event.body ?? '{}');
-    const orderId = randomUUID();
     const channel: Channel = body.channel ?? 'web';
     const createdAt = new Date().toISOString();
 
-    logger.info('Order intake received', { orderId, channel });
+    // Derive a stable idempotency key from client-supplied data
+    const idempKey: string = body.idempotencyKey
+      ?? createHash('sha256')
+          .update((body.customerId ?? '') + JSON.stringify(body.items ?? []))
+          .digest('hex');
 
-    // Idempotency check
-    const isNew = await checkIdempotency(orderId, orderId);
+    logger.info('Order intake received', { idempKey, channel });
+
+    // Generate orderId then run idempotency check; orderId is stored as the
+    // associated value so a duplicate request can return the original orderId.
+    const orderId = randomUUID();
+    const isNew = await checkIdempotency(idempKey, orderId);
     if (!isNew) {
-      logger.warn('Duplicate order detected', { orderId });
+      logger.warn('Duplicate order detected', { idempKey });
       return {
         statusCode: 409,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'Duplicate order', orderId }),
+        body: JSON.stringify({ message: 'Duplicate order', idempKey }),
       };
     }
 

@@ -54,7 +54,7 @@ export class IngestionApiConstruct extends Construct {
       restApiName: `${props.stageName}-TrunkfulApi`,
       description: 'Trunkful order processing REST API',
       deployOptions: {
-        stageName: 'prod',
+        stageName: props.stageName,
         tracingEnabled: true,
         throttlingRateLimit: 1000,
         throttlingBurstLimit: 500,
@@ -257,26 +257,22 @@ export class IngestionApiConstruct extends Construct {
 
     ddbReadRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ['dynamodb:Query'],
-        resources: [
-          props.ordersTable.tableArn,
-          `${props.ordersTable.tableArn}/index/GSI1`,
-        ],
+        actions: ['dynamodb:GetItem'],
+        resources: [props.ordersTable.tableArn],
       }),
     );
 
     const ddbIntegration = new apigateway.AwsIntegration({
       service: 'dynamodb',
-      action: 'Query',
+      action: 'GetItem',
       options: {
         credentialsRole: ddbReadRole,
         requestTemplates: {
           'application/json': JSON.stringify({
             TableName: props.ordersTable.tableName,
-            IndexName: 'GSI1',
-            KeyConditionExpression: 'orderId = :orderId',
-            ExpressionAttributeValues: {
-              ':orderId': { S: "$input.params('orderId')" },
+            Key: {
+              pk: { S: "ORDER#$input.params('orderId')" },
+              sk: { S: "ORDER#$input.params('orderId')" },
             },
           }),
         },
@@ -285,21 +281,15 @@ export class IngestionApiConstruct extends Construct {
             statusCode: '200',
             responseTemplates: {
               'application/json': [
-                '#set($items = $input.path(\'$.Items\'))',
-                '#if($items.size() == 0)',
+                '#set($item = $input.path(\'$.Item\'))',
+                '#if($item == "" || $item == {})',
                 '  {"message": "Order not found"}',
                 '#else',
                 '  {',
-                '    "orders": [',
-                '      #foreach($item in $items)',
-                '        {',
-                '          "orderId": "$item.orderId.S",',
-                '          "pk": "$item.pk.S",',
-                '          "sk": "$item.sk.S",',
-                '          "createdAt": "$item.createdAt.S"',
-                '        }#if($foreach.hasNext),#end',
-                '      #end',
-                '    ]',
+                '    "orderId": "$item.orderId.S",',
+                '    "pk": "$item.pk.S",',
+                '    "sk": "$item.sk.S",',
+                '    "createdAt": "$item.createdAt.S"',
                 '  }',
                 '#end',
               ].join('\n'),
@@ -307,14 +297,14 @@ export class IngestionApiConstruct extends Construct {
           },
           {
             statusCode: '400',
-            selectionPattern: '4\\d{2}',
+            selectionPattern: '.*ValidationException.*',
             responseTemplates: {
               'application/json': '{"message": "Bad request"}',
             },
           },
           {
             statusCode: '500',
-            selectionPattern: '5\\d{2}',
+            selectionPattern: '.*InternalServerError.*',
             responseTemplates: {
               'application/json': '{"message": "Internal server error"}',
             },

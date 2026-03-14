@@ -21,24 +21,9 @@ export class IngestionWarehouseConstruct extends Construct {
       description:
         'Assumed by warehouse scanner devices to publish inventory events to EventBridge',
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      externalIds: [`${props.stageName}-trunkful-warehouse-scanner`],
     });
 
     // Grant the role permission to put events on the bus
     props.eventBus.grantPutEventsTo(this.warehouseRole);
-
-    // Add a scoped policy restricting PutEvents to source = 'trunkful.warehouse'
-    this.warehouseRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['events:PutEvents'],
-        resources: [props.eventBus.eventBusArn],
-        conditions: {
-          StringEquals: {
-            'events:source': 'trunkful.warehouse',
-          },
-        },
-      }),
-    );
   }
 }

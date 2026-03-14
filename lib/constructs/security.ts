@@ -18,7 +18,7 @@ export class SecurityConstruct extends Construct {
 
     // KMS Customer Managed Key for PII encryption
     this.piiEncryptionKey = new kms.Key(this, 'PiiEncryptionKey', {
-      alias: `${props.stageName}-trunkful/pii-encryption`,
+      alias: `${props.stageName}-trunkful-pii-encryption`,
       description: `CMK for encrypting PII data (${props.stageName})`,
       enableKeyRotation: true,
       removalPolicy: props.removalPolicy,

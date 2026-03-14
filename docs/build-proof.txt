@@ -1,0 +1,1979 @@
+Description: Trunkful CI/CD Pipeline with Alpha and Prod stages
+Resources:
+  TrunkfulPipelineArtifactsBucket777657FA:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/ArtifactsBucket/Resource
+  TrunkfulPipelineArtifactsBucketPolicyAF2C8B1D:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: TrunkfulPipelineArtifactsBucket777657FA
+      PolicyDocument:
+        Statement:
+          - Action: s3:*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+          - Action:
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/ArtifactsBucket/Policy/Resource
+  TrunkfulPipelineRole39E9123B:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Role/Resource
+  TrunkfulPipelineRoleDefaultPolicy05B54680:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:Abort*
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineProdPromoteToProdCodePipelineActionRole3A4A9F62
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleD6644DCF
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineRoleDefaultPolicy05B54680
+      Roles:
+        - Ref: TrunkfulPipelineRole39E9123B
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Role/DefaultPolicy/Resource
+  TrunkfulPipeline3F3BE5DB:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location:
+          Ref: TrunkfulPipelineArtifactsBucket777657FA
+        Type: S3
+      Name: TrunkfulPipeline
+      PipelineType: V2
+      RestartExecutionOnUpdate: true
+      RoleArn:
+        Fn::GetAtt:
+          - TrunkfulPipelineRole39E9123B
+          - Arn
+      Stages:
+        - Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: arn:aws:codeconnections:us-west-2:ACCOUNT:connection/CONNECTION_ID
+                FullRepositoryId: OWNER/REPO
+                BranchName: main
+              Name: OWNER_REPO
+              OutputArtifacts:
+                - Name: OWNER_REPO_Source
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleD6644DCF
+                  - Arn
+              RunOrder: 1
+          Name: Source
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineBuildSynthCdkBuildProjectDF909532
+                EnvironmentVariables: '[{"name":"_PROJECT_CONFIG_HASH","type":"PLAINTEXT","value":"f2794de80579afda4086ccb3c4130b16714855c3becebc09fab52f9fb00dc9a6"}]'
+              InputArtifacts:
+                - Name: OWNER_REPO_Source
+              Name: Synth
+              OutputArtifacts:
+                - Name: Synth_Output
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+          Name: Build
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineUpdatePipelineSelfMutation627FB03D
+                EnvironmentVariables: '[{"name":"_PROJECT_CONFIG_HASH","type":"PLAINTEXT","value":"4bb98c72d2afde81257d709e58943ed4a53dc5b04b584f1f857e6d6cfedac71a"}]'
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: SelfMutate
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+          Name: UpdatePipeline
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset1BCFB730B
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: IngestionApi_OrderIntakeFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset10D29E1C59
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderRelease_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset11FE0E1F64
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderMarkFailed_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset1234CEF927
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderEmitEvent_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset13C78B5E47
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderSagaTrigger_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset148F15729B
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_InvProcessItem_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset15EE94558A
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_InventoryWorkflowTrigger_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset164A4E9490
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_BillingFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset17ED401175
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_FulfillmentFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset18EAD16941
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_NotificationFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset23110E803
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: IngestionApi_WebhookIntakeFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset35F402DCD
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: IngestionIot_PosIntakeFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset4EBD0AB2D
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: TrunkfulPipelineStack_Alpha_TrunkfulStack_Custom_S3AutoDeleteObjectsCustomResourceProvider_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset51E8E9CF1
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: IngestionS3_AdminIngestFn_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset627DB4F29
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderValidate_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset739EB6D53
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderReserve_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset88250DC1A
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderPayment_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TrunkfulPipelineAssetsFileAsset909B2C387
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Processing_OrderConfirm_Code
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineCodeBuildActionRole09376062
+                  - Arn
+              RunOrder: 1
+          Name: Assets
+        - Actions:
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                StackName: Alpha-TrunkfulStack
+                Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":iam::"
+                      - Ref: AWS::AccountId
+                      - :role/cdk-hnb659fds-cfn-exec-role-
+                      - Ref: AWS::AccountId
+                      - "-"
+                      - Ref: AWS::Region
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: PipelineChange
+                TemplatePath: Synth_Output::assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.template.json
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: Prepare
+              RoleArn:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                StackName: Alpha-TrunkfulStack
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: PipelineChange
+              Name: Deploy
+              RoleArn:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+              RunOrder: 2
+          Name: Alpha
+        - Actions:
+            - ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                CustomData: Review Alpha deployment and approve promotion to Production.
+              Name: PromoteToProd
+              RoleArn:
+                Fn::GetAtt:
+                  - TrunkfulPipelineProdPromoteToProdCodePipelineActionRole3A4A9F62
+                  - Arn
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                StackName: Prod-TrunkfulStack
+                Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":iam::"
+                      - Ref: AWS::AccountId
+                      - :role/cdk-hnb659fds-cfn-exec-role-
+                      - Ref: AWS::AccountId
+                      - "-"
+                      - Ref: AWS::Region
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: PipelineChange
+                TemplatePath: Synth_Output::assembly-TrunkfulPipelineStack-Prod/TrunkfulPipelineStackProdTrunkfulStack1CEBBB2C.template.json
+              InputArtifacts:
+                - Name: Synth_Output
+              Name: TrunkfulStack.Prepare
+              RoleArn:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                StackName: Prod-TrunkfulStack
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: PipelineChange
+              Name: TrunkfulStack.Deploy
+              RoleArn:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :role/cdk-hnb659fds-deploy-role-
+                    - Ref: AWS::AccountId
+                    - "-"
+                    - Ref: AWS::Region
+              RunOrder: 3
+          Name: Prod
+    DependsOn:
+      - TrunkfulPipelineRoleDefaultPolicy05B54680
+      - TrunkfulPipelineRole39E9123B
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Resource
+  TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleD6644DCF:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - TrunkfulPipelineRole39E9123B
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Source/OWNER_REPO/CodePipelineActionRole/Resource
+  TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleDefaultPolicy74883CF4:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: codestar-connections:UseConnection
+            Effect: Allow
+            Resource: arn:aws:codeconnections:us-west-2:ACCOUNT:connection/CONNECTION_ID
+          - Action:
+              - s3:Abort*
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+          - Action:
+              - s3:PutObjectAcl
+              - s3:PutObjectVersionAcl
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - Fn::GetAtt:
+                      - TrunkfulPipelineArtifactsBucket777657FA
+                      - Arn
+                  - /*
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleDefaultPolicy74883CF4
+      Roles:
+        - Ref: TrunkfulPipelineSourceOWNERREPOCodePipelineActionRoleD6644DCF
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Source/OWNER_REPO/CodePipelineActionRole/DefaultPolicy/Resource
+  TrunkfulPipelineBuildSynthCdkBuildProjectRoleFD52CC7B:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Build/Synth/CdkBuildProject/Role/Resource
+  TrunkfulPipelineBuildSynthCdkBuildProjectRoleDefaultPolicyBC6900F0:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:"
+                    - Ref: AWS::Region
+                    - ":"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TrunkfulPipelineBuildSynthCdkBuildProjectDF909532
+                    - :*
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:"
+                    - Ref: AWS::Region
+                    - ":"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TrunkfulPipelineBuildSynthCdkBuildProjectDF909532
+          - Action:
+              - codebuild:BatchPutCodeCoverages
+              - codebuild:BatchPutTestCases
+              - codebuild:CreateReport
+              - codebuild:CreateReportGroup
+              - codebuild:UpdateReport
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:"
+                  - Ref: AWS::Region
+                  - ":"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: TrunkfulPipelineBuildSynthCdkBuildProjectDF909532
+                  - -*
+          - Action:
+              - s3:Abort*
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineBuildSynthCdkBuildProjectRoleDefaultPolicyBC6900F0
+      Roles:
+        - Ref: TrunkfulPipelineBuildSynthCdkBuildProjectRoleFD52CC7B
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Build/Synth/CdkBuildProject/Role/DefaultPolicy/Resource
+  TrunkfulPipelineBuildSynthCdkBuildProjectDF909532:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Build/Synth
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineBuildSynthCdkBuildProjectRoleFD52CC7B
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "build": {
+                "commands": [
+                  "npm ci",
+                  "npx cdk synth"
+                ]
+              }
+            },
+            "artifacts": {
+              "base-directory": "cdk.out",
+              "files": "**/*"
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Build/Synth/CdkBuildProject/Resource
+  TrunkfulPipelineProdPromoteToProdCodePipelineActionRole3A4A9F62:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - TrunkfulPipelineRole39E9123B
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Pipeline/Prod/PromoteToProd/CodePipelineActionRole/Resource
+  TrunkfulPipelineCodeBuildActionRole09376062:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - TrunkfulPipelineRole39E9123B
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/CodeBuildActionRole/Resource
+  TrunkfulPipelineCodeBuildActionRoleDefaultPolicy1A4E9E62:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset10D29E1C59
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset11FE0E1F64
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset1234CEF927
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset13C78B5E47
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset148F15729B
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset15EE94558A
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset164A4E9490
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset17ED401175
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset18EAD16941
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset1BCFB730B
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset23110E803
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset35F402DCD
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset4EBD0AB2D
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset51E8E9CF1
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset627DB4F29
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset739EB6D53
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset88250DC1A
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineAssetsFileAsset909B2C387
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineBuildSynthCdkBuildProjectDF909532
+                  - Arn
+              - Fn::GetAtt:
+                  - TrunkfulPipelineUpdatePipelineSelfMutation627FB03D
+                  - Arn
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineCodeBuildActionRoleDefaultPolicy1A4E9E62
+      Roles:
+        - Ref: TrunkfulPipelineCodeBuildActionRole09376062
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/CodeBuildActionRole/DefaultPolicy/Resource
+  TrunkfulPipelineUpdatePipelineSelfMutationRoleDAAC7A26:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/UpdatePipeline/SelfMutation/Role/Resource
+  TrunkfulPipelineUpdatePipelineSelfMutationRoleDefaultPolicy3574DDEB:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:"
+                    - Ref: AWS::Region
+                    - ":"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TrunkfulPipelineUpdatePipelineSelfMutation627FB03D
+                    - :*
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:"
+                    - Ref: AWS::Region
+                    - ":"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TrunkfulPipelineUpdatePipelineSelfMutation627FB03D
+          - Action:
+              - codebuild:BatchPutCodeCoverages
+              - codebuild:BatchPutTestCases
+              - codebuild:CreateReport
+              - codebuild:CreateReportGroup
+              - codebuild:UpdateReport
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:"
+                  - Ref: AWS::Region
+                  - ":"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: TrunkfulPipelineUpdatePipelineSelfMutation627FB03D
+                  - -*
+          - Action: sts:AssumeRole
+            Condition:
+              ForAnyValue:StringEquals:
+                iam:ResourceTag/aws-cdk:bootstrap-role:
+                  - image-publishing
+                  - file-publishing
+                  - deploy
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:*:iam::"
+                  - Ref: AWS::AccountId
+                  - :role/*
+          - Action:
+              - cloudformation:DescribeStacks
+              - s3:ListBucket
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineUpdatePipelineSelfMutationRoleDefaultPolicy3574DDEB
+      Roles:
+        - Ref: TrunkfulPipelineUpdatePipelineSelfMutationRoleDAAC7A26
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/UpdatePipeline/SelfMutation/Role/DefaultPolicy/Resource
+  TrunkfulPipelineUpdatePipelineSelfMutation627FB03D:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/UpdatePipeline/SelfMutate
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: TrunkfulPipeline-selfupdate
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineUpdatePipelineSelfMutationRoleDAAC7A26
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g aws-cdk@2"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk -a . deploy TrunkfulPipelineStack --require-approval=never --verbose"
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/UpdatePipeline/SelfMutation/Resource
+  TrunkfulPipelineAssetsFileRole27DE371E:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileRole/Resource
+  TrunkfulPipelineAssetsFileRoleDefaultPolicy590469C3:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":logs:"
+                  - Ref: AWS::Region
+                  - ":"
+                  - Ref: AWS::AccountId
+                  - :log-group:/aws/codebuild/*
+          - Action:
+              - codebuild:BatchPutCodeCoverages
+              - codebuild:BatchPutTestCases
+              - codebuild:CreateReport
+              - codebuild:CreateReportGroup
+              - codebuild:UpdateReport
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:"
+                  - Ref: AWS::Region
+                  - ":"
+                  - Ref: AWS::AccountId
+                  - :report-group/*
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource: "*"
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-hnb659fds-file-publishing-role-${AWS::AccountId}-${AWS::Region}
+          - Action:
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TrunkfulPipelineArtifactsBucket777657FA
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - TrunkfulPipelineArtifactsBucket777657FA
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+      PolicyName: TrunkfulPipelineAssetsFileRoleDefaultPolicy590469C3
+      Roles:
+        - Ref: TrunkfulPipelineAssetsFileRole27DE371E
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileRole/DefaultPolicy/Resource
+  TrunkfulPipelineAssetsFileAsset1BCFB730B:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/IngestionApi_OrderIntakeFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"8651b1df4af24b2ac338bd870fcff2ea2899a4e061500825a0a7a666de7b2bf6:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset1/Resource
+  TrunkfulPipelineAssetsFileAsset10D29E1C59:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderRelease_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"f07caaafbaefced16eaa301b1a5ac8f359f482cdff73071c02808d92ab72c6e5:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset10/Resource
+  TrunkfulPipelineAssetsFileAsset11FE0E1F64:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderMarkFailed_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"27c48581cc443768d97ad2acc472f91992d8bb9fdf604765964d83125f464793:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset11/Resource
+  TrunkfulPipelineAssetsFileAsset1234CEF927:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderEmitEvent_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"ca0a7bf7cc82ac723b688261cfe894ef7d67b9e9f643ce246cca7fadbdc6c2ea:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset12/Resource
+  TrunkfulPipelineAssetsFileAsset13C78B5E47:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderSagaTrigger_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"f6030c58795b9dc3d1b55b25661674c43cb247ccedcc5c86faad6b4f73b8b05d:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset13/Resource
+  TrunkfulPipelineAssetsFileAsset148F15729B:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_InvProcessItem_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"cce9f322681f659cf1ad949d51f46902165047e564a98848f0fb8d2d19b285c3:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset14/Resource
+  TrunkfulPipelineAssetsFileAsset15EE94558A:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_InventoryWorkflowTrigger_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"d30ede68b2ef882840429da60c8f15c4bacbff66e6912330ff21d71ab5687fbc:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset15/Resource
+  TrunkfulPipelineAssetsFileAsset164A4E9490:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_BillingFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"cbf4172a7fce64ede31fba5077536ee76ceb8fba68466439053a3d9534d0ce87:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset16/Resource
+  TrunkfulPipelineAssetsFileAsset17ED401175:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_FulfillmentFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"7d89b9ba6155ba795d65041502e2da20e4f1d8c9e0e70f34f3e16b65df733636:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset17/Resource
+  TrunkfulPipelineAssetsFileAsset18EAD16941:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_NotificationFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"ae7498abf1898788da99fcea4effa20d605568575524e42a07dbbb5ac930ca21:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset18/Resource
+  TrunkfulPipelineAssetsFileAsset23110E803:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/IngestionApi_WebhookIntakeFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"a2f25186ff05ca34ffa980908005db09b068436e3caaa87c994724670fb99f5d:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset2/Resource
+  TrunkfulPipelineAssetsFileAsset35F402DCD:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/IngestionIot_PosIntakeFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"426c0a6961ae73ae76170154306571ae7ba1e175279924c3cfae945260c640f9:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset3/Resource
+  TrunkfulPipelineAssetsFileAsset4EBD0AB2D:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/TrunkfulPipelineStack_Alpha_TrunkfulStack_Custom_S3AutoDeleteObjectsCustomResourceProvider_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"faa95a81ae7d7373f3e1f242268f904eb748d8d0fdd306e8a6fe515a1905a7d6:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset4/Resource
+  TrunkfulPipelineAssetsFileAsset51E8E9CF1:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/IngestionS3_AdminIngestFn_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"38dadab03179ac091f0c7744477bf59ead631b4ecf54b575b80c3378ff44b62b:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset5/Resource
+  TrunkfulPipelineAssetsFileAsset627DB4F29:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderValidate_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"6d3d72d15f843f183682e78e5015635e9e7beac6117d63bea51284afb658bf56:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset6/Resource
+  TrunkfulPipelineAssetsFileAsset739EB6D53:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderReserve_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"3b3f147c757f1ca918fddc9befdd9fc67669f0ebf859513e1eec3d028e73f1d3:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset7/Resource
+  TrunkfulPipelineAssetsFileAsset88250DC1A:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderPayment_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"93723701480d88d6b347dbbf49b141a3b2bb2b00b53ebdddfb8745be6f1701c4:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset8/Resource
+  TrunkfulPipelineAssetsFileAsset909B2C387:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Pipeline step TrunkfulPipelineStack/Pipeline/Assets/Processing_OrderConfirm_Code
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Fn::GetAtt:
+          - TrunkfulPipelineAssetsFileRole27DE371E
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "commands": [
+                  "npm install -g cdk-assets@latest"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cdk-assets --path \"assembly-TrunkfulPipelineStack-Alpha/TrunkfulPipelineStackAlphaTrunkfulStack3AD14AFE.assets.json\" --verbose publish \"cb4d71bf3d0870d1926a109e8aeda08707278de1cb749e8aba84299965b8f96a:current_account-current_region\""
+                ]
+              }
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/TrunkfulPipeline/Assets/FileAsset9/Resource
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:H4sIAAAAAAAA/+1aUW/aMBD+Lc3jZDLKntY3yrpp6tohYH1BVWWcgxmCHdlONxTlv+8cx4Ru2rStUKC1BCL57nzf57tz5JB04k67HZ+e0G+6xZJFK+WTuBgayhYk4xmkXICOezKBfn1G0POuYIh4e1x427iIPHhNlxCdRa8isoZGq8xCNx3EmJJadxmTuTCXsNLR2ZSmGmrDAGZcigFkKWfU4OF5zhZgdB1QQa6h1zgO8yyTylSqGx9tqDIX34HlNsJn8SVLqEEBRuXIo2Tq9YGgkxRQxUCaiq3GcTifUmYceQ0is5/tAEO8l6rL7Bg/g5IUEU0S1DLD+JgQbY/W2Shvj8PhlvSmwk+0JPpNXLg0oPOkOtgoMAimVpnNAibxFwyBy6vh3VX3uvvh4l1lmkrFYDj85IsxSSVb9PMJlht7AnRTxKW8p2lfosEGVmAoF5FT5/QQ9+Nc1uLqaTRuzl4STpdxYQuHrlTrfAnJOUbGvlVcMJ7RtG5K3wOVjx3gyuwCu/Zp8uXSOZJ9H8QrHhd1sg325tePwmZzbcORf2H8c9xgDdaXY/3vBWtHzxQVprs2b6yxyuLOycN192/y9rLIH1yJyCNzdIgTfNKqN1z1df2Au2bn0gJBIAgEgSAQBILnQfD8N0s7s241dTuowzYT8cjSbb0m2wt4uP11qLIDdaAO1IE6UAfqQH3o1NUjH7tJJA6ubhj8pm0kf7qr+B1cPRozsARhnzlu0AY4wFuF99SeL4s2wAcBH3P1j1l7gJ8Udq/OVLuPktj3pCY5T5PmJam+knNgZly4fdIxfdzUnP6yJAPQMlcM/L+y+/hiGQTmOJ7r1/eddnz6Nu6czDXnLZULw5cQD9zvD51OA3DoJgAA
+    Metadata:
+      aws:cdk:path: TrunkfulPipelineStack/CDKMetadata/Default
+    Condition: CDKMetadataAvailable
+Conditions:
+  CDKMetadataAvailable:
+    Fn::Or:
+      - Fn::Or:
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - af-south-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-east-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-northeast-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-northeast-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-northeast-3
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-south-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-south-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-southeast-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-southeast-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-southeast-3
+      - Fn::Or:
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ap-southeast-4
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ca-central-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - ca-west-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - cn-north-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - cn-northwest-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-central-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-central-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-north-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-south-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-south-2
+      - Fn::Or:
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-west-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-west-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - eu-west-3
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - il-central-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - me-central-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - me-south-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - sa-east-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - us-east-1
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - us-east-2
+          - Fn::Equals:
+              - Ref: AWS::Region
+              - us-west-1
+      - Fn::Equals:
+          - Ref: AWS::Region
+          - us-west-2
+Parameters:
+  BootstrapVersion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cdk-bootstrap/hnb659fds/version
+    Description: Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]
+

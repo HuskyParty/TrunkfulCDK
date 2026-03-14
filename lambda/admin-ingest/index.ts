@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import {
   DynamoDBClient,
   PutItemCommand,
@@ -67,14 +67,20 @@ export const handler = async (event: any) => {
         throw new Error('ORDERS_TABLE environment variable is not set');
       }
 
-      for (const order of orders) {
-        const orderId = randomUUID();
+      for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
+        const order = orders[orderIndex];
         const createdAt = new Date().toISOString();
 
-        // Idempotency check
-        const isNew = await checkIdempotency(orderId, orderId);
+        // Derive a stable idempotency key from the S3 source coordinates
+        const idempKey = createHash('sha256')
+          .update(`${bucket}:${key}:${orderIndex}`)
+          .digest('hex');
+
+        // Generate orderId then run idempotency check
+        const orderId = randomUUID();
+        const isNew = await checkIdempotency(idempKey, orderId);
         if (!isNew) {
-          logger.warn('Duplicate warehouse order detected', { orderId });
+          logger.warn('Duplicate warehouse order detected', { idempKey, bucket, key, orderIndex });
           continue;
         }
 

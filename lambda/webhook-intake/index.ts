@@ -3,6 +3,10 @@ import {
   DynamoDBClient,
   PutItemCommand,
 } from '@aws-sdk/client-dynamodb';
+import {
+  SecretsManagerClient,
+  GetSecretValueCommand,
+} from '@aws-sdk/client-secrets-manager';
 import { checkIdempotency } from '../shared/idempotency.js';
 import { emitEvent } from '../shared/event-emitter.js';
 import { logger } from '../shared/logger.js';
@@ -10,11 +14,32 @@ import { EventType, OrderStatus } from '../shared/types.js';
 import type { Channel } from '../shared/types.js';
 
 const ddb = new DynamoDBClient({});
+const sm = new SecretsManagerClient({});
+
+// Cached outside the handler so warm invocations skip the Secrets Manager call.
+let cachedWebhookSecret: string | undefined;
+
+async function getWebhookSecret(): Promise<string> {
+  if (cachedWebhookSecret) {
+    return cachedWebhookSecret;
+  }
+  const secretArn = process.env.WEBHOOK_SECRET_ARN;
+  if (!secretArn) {
+    throw new Error('WEBHOOK_SECRET_ARN environment variable is not set');
+  }
+  const response = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  if (!response.SecretString) {
+    throw new Error('Secrets Manager returned an empty secret value');
+  }
+  const secret = response.SecretString;
+  cachedWebhookSecret = secret;
+  return secret;
+}
 
 export const handler = async (event: any) => {
   try {
     // Validate webhook secret
-    const webhookSecret = process.env.WEBHOOK_SECRET;
+    const webhookSecret = await getWebhookSecret();
     const headerSecret =
       event.headers?.['X-Webhook-Secret'] ??
       event.headers?.['x-webhook-secret'];
@@ -31,20 +56,31 @@ export const handler = async (event: any) => {
     }
 
     const body = JSON.parse(event.body ?? '{}');
-    const orderId = randomUUID();
     const channel: Channel = 'supplier';
     const createdAt = new Date().toISOString();
 
-    logger.info('Webhook intake received', { orderId, channel });
+    // Derive a stable idempotency key from supplier-supplied fields
+    const idempKey: string = body.idempotencyKey ?? body.supplierOrderId;
+    if (!idempKey) {
+      logger.warn('Webhook request missing idempotency key', {});
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: 'Missing idempotencyKey or supplierOrderId' }),
+      };
+    }
 
-    // Idempotency check
-    const isNew = await checkIdempotency(orderId, orderId);
+    logger.info('Webhook intake received', { idempKey, channel });
+
+    // Generate orderId then run idempotency check
+    const orderId = randomUUID();
+    const isNew = await checkIdempotency(idempKey, orderId);
     if (!isNew) {
-      logger.warn('Duplicate webhook order detected', { orderId });
+      logger.warn('Duplicate webhook order detected', { idempKey });
       return {
         statusCode: 409,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'Duplicate order', orderId }),
+        body: JSON.stringify({ message: 'Duplicate order', idempKey }),
       };
     }
 

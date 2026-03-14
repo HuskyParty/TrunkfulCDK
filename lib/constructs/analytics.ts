@@ -5,6 +5,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as glue from 'aws-cdk-lib/aws-glue';
 import * as athena from 'aws-cdk-lib/aws-athena';
 import * as firehose from 'aws-cdk-lib/aws-kinesisfirehose';
+import * as cdk from 'aws-cdk-lib';
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 
 interface AnalyticsProps {
@@ -84,7 +85,7 @@ export class AnalyticsConstruct extends Construct {
     // 3. Glue Database (moved before Firehose so the ARN is available)
     // ---------------------------------------------------------------
     const glueDatabase = new glue.CfnDatabase(this, 'AnalyticsDatabase', {
-      catalogId: this.node.tryGetContext('aws:cdk:account') || '',
+      catalogId: cdk.Stack.of(this).account,
       databaseInput: {
         name: `${props.stageName}_trunkful_analytics`,
       },
@@ -122,7 +123,6 @@ export class AnalyticsConstruct extends Construct {
             { name: 'status', type: 'string' },
             { name: 'customerId', type: 'string' },
             { name: 'timestamp', type: 'string' },
-            { name: 'eventType', type: 'string' },
             { name: 'amount', type: 'double' },
             { name: 'currency', type: 'string' },
             { name: 'items', type: 'string' },
@@ -132,7 +132,6 @@ export class AnalyticsConstruct extends Construct {
           { name: 'year', type: 'string' },
           { name: 'month', type: 'string' },
           { name: 'day', type: 'string' },
-          { name: 'eventType', type: 'string' },
         ],
       },
     });
@@ -150,32 +149,11 @@ export class AnalyticsConstruct extends Construct {
           bucketArn: dataLakeBucket.bucketArn,
           roleArn: firehoseRole.roleArn,
           prefix:
-            'events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/eventType=!{partitionKeyFromQuery:eventType}/',
+            'events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/',
           errorOutputPrefix: 'errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/',
           bufferingHints: {
             intervalInSeconds: 60,
             sizeInMBs: 1,
-          },
-          dynamicPartitioningConfiguration: {
-            enabled: true,
-          },
-          processingConfiguration: {
-            enabled: true,
-            processors: [
-              {
-                type: 'MetadataExtraction',
-                parameters: [
-                  {
-                    parameterName: 'MetadataExtractionQuery',
-                    parameterValue: '{eventType:.eventType}',
-                  },
-                  {
-                    parameterName: 'JsonParsingEngine',
-                    parameterValue: 'JQ-1.6',
-                  },
-                ],
-              },
-            ],
           },
           dataFormatConversionConfiguration: {
             enabled: true,
@@ -193,7 +171,7 @@ export class AnalyticsConstruct extends Construct {
               roleArn: firehoseRole.roleArn,
               databaseName: `${props.stageName}_trunkful_analytics`,
               tableName: 'order_events',
-              region: this.node.tryGetContext('aws:cdk:region') || 'us-east-1',
+              region: cdk.Stack.of(this).region,
               versionId: 'LATEST',
             },
           },

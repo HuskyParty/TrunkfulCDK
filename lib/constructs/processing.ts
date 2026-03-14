@@ -75,10 +75,13 @@ export class ProcessingConstruct extends Construct {
     });
     const processPaymentFn = createStepFn('OrderPayment', 'order-steps/process-payment.ts', {
       ORDERS_TABLE: props.ordersTable.tableName,
+      PAYMENT_SECRET_ARN: props.paymentSecret.secretArn,
+      EVENT_BUS_NAME: props.eventBus.eventBusName,
     }, 15);
     const confirmOrderFn = createStepFn('OrderConfirm', 'order-steps/confirm-order.ts', orderEnv);
     const releaseInventoryFn = createStepFn('OrderRelease', 'order-steps/release-inventory.ts', {
       EVENT_BUS_NAME: props.eventBus.eventBusName,
+      INVENTORY_TABLE: props.inventoryTable.tableName,
     });
     const markFailedFn = createStepFn('OrderMarkFailed', 'order-steps/mark-failed.ts', orderEnv);
     const emitEventFn = createStepFn('OrderEmitEvent', 'order-steps/emit-event.ts', {
@@ -98,6 +101,8 @@ export class ProcessingConstruct extends Construct {
 
     props.ordersTable.grant(processPaymentFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem'); // circuit breaker state
     props.paymentSecret.grantRead(processPaymentFn);
+    props.eventBus.grantPutEventsTo(processPaymentFn);
+    props.inventoryTable.grant(releaseInventoryFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
     props.eventBus.grantPutEventsTo(releaseInventoryFn);
     // emitEventFn only needs to put events on the bus
     props.eventBus.grantPutEventsTo(emitEventFn);
@@ -169,7 +174,7 @@ export class ProcessingConstruct extends Construct {
     const processPayment = new tasks.LambdaInvoke(this, 'ProcessPayment', {
       lambdaFunction: processPaymentFn,
       payloadResponseOnly: true,
-      resultPath: '$',
+      resultPath: sfn.JsonPath.DISCARD,
     });
 
     const confirmOrder = new tasks.LambdaInvoke(this, 'ConfirmOrder', {
@@ -426,7 +431,7 @@ export class ProcessingConstruct extends Construct {
     props.eventBus.grantPutEventsTo(notificationFn);
     props.piiKey.grantDecrypt(notificationFn);
     notificationFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ses:SendEmail', 'sns:Publish'],
+      actions: ['ses:SendEmail', 'sns:Publish', 'cloudwatch:PutMetricData'],
       resources: ['*'],
     }));
 

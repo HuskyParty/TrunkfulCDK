@@ -45,7 +45,7 @@ export class IngestionIotConstruct extends Construct {
     // 2. IoT Topic Rule (L1 — CfnTopicRule)
     // ---------------------------------------------------------------
     const topicRule = new iot.CfnTopicRule(this, 'PosOrderTopicRule', {
-      ruleName: `${props.stageName}-TrunkfulPosOrderRule`,
+      ruleName: `${props.stageName.replace(/-/g, '_')}_TrunkfulPosOrderRule`,
       topicRulePayload: {
         sql: "SELECT *, topic(2) as deviceId FROM 'pos/+/orders'",
         awsIotSqlVersion: '2016-03-23',
@@ -71,7 +71,7 @@ export class IngestionIotConstruct extends Construct {
     // ---------------------------------------------------------------
     // 4. IoT Policy template for POS device permissions
     // ---------------------------------------------------------------
-    new iot.CfnPolicy(this, 'PosDevicePolicy', {
+    const posDevicePolicy = new iot.CfnPolicy(this, 'PosDevicePolicy', {
       policyName: `${props.stageName}-TrunkfulPosDevicePolicy`,
       policyDocument: {
         Version: '2012-10-17',
@@ -93,7 +93,7 @@ export class IngestionIotConstruct extends Construct {
     // ---------------------------------------------------------------
     // 5. Thing Group for POS terminals
     // ---------------------------------------------------------------
-    new iot.CfnThingGroup(this, 'PosTerminalThingGroup', {
+    const posTerminalThingGroup = new iot.CfnThingGroup(this, 'PosTerminalThingGroup', {
       thingGroupName: `${props.stageName}-TrunkfulPosTerminals`,
     });
 
@@ -107,7 +107,7 @@ export class IngestionIotConstruct extends Construct {
       ],
     });
 
-    new iot.CfnProvisioningTemplate(this, 'PosFleetProvisioningTemplate', {
+    const provisioningTemplate = new iot.CfnProvisioningTemplate(this, 'PosFleetProvisioningTemplate', {
       templateName: `${props.stageName}-TrunkfulPosFleetProvisioning`,
       provisioningRoleArn: fleetProvisioningRole.roleArn,
       enabled: true,
@@ -140,5 +140,8 @@ export class IngestionIotConstruct extends Construct {
         },
       }),
     });
+
+    provisioningTemplate.node.addDependency(posDevicePolicy);
+    provisioningTemplate.node.addDependency(posTerminalThingGroup);
   }
 }

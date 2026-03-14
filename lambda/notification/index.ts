@@ -7,12 +7,17 @@
  */
 import type { SQSEvent } from 'aws-lambda';
 import { KMSClient, DecryptCommand } from '@aws-sdk/client-kms';
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from '@aws-sdk/client-cloudwatch';
 
 // ---------------------------------------------------------------------------
 // Clients & config
 // ---------------------------------------------------------------------------
 
 const kms = new KMSClient({});
+const cw = new CloudWatchClient({});
 const KMS_KEY_ID = process.env.KMS_KEY_ID;
 
 const logger = {
@@ -55,6 +60,34 @@ async function decryptIfEncrypted(value: string): Promise<string> {
   return value;
 }
 
+/**
+ * Emit NotificationLatencyMs custom metric — measures the time between the
+ * original status change (detail.timestamp) and now (delivery time).
+ */
+async function emitNotificationLatency(
+  detailType: string,
+  eventTimestamp?: string,
+): Promise<void> {
+  if (!eventTimestamp) return;
+  const latencyMs = Date.now() - new Date(eventTimestamp).getTime();
+  if (latencyMs < 0) return; // clock skew guard
+  await cw.send(
+    new PutMetricDataCommand({
+      Namespace: 'RetailPlatform',
+      MetricData: [
+        {
+          MetricName: 'NotificationLatencyMs',
+          Dimensions: [{ Name: 'EventType', Value: detailType }],
+          Value: latencyMs,
+          Unit: 'Milliseconds',
+          Timestamp: new Date(),
+        },
+      ],
+    }),
+  );
+  logger.info('Notification latency metric emitted', { detailType, latencyMs });
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
@@ -86,6 +119,7 @@ export const handler = async (event: SQSEvent): Promise<void> => {
             customerName,
           });
           // Stub: SES SendEmail would go here
+          await emitNotificationLatency(detailType, detail.timestamp);
           break;
 
         case 'OrderFailed':
@@ -95,6 +129,7 @@ export const handler = async (event: SQSEvent): Promise<void> => {
             email,
           });
           // Stub: SES SendEmail with failure template
+          await emitNotificationLatency(detailType, detail.timestamp);
           break;
 
         case 'InventoryLow':
@@ -105,6 +140,7 @@ export const handler = async (event: SQSEvent): Promise<void> => {
             threshold: detail.threshold,
           });
           // Stub: SNS publish to ops topic or SES to ops team
+          await emitNotificationLatency(detailType, detail.timestamp);
           break;
 
         default:
