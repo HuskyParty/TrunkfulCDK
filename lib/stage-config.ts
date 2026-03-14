@@ -31,10 +31,10 @@ export const PROD_CONFIG: StageConfig = {
   removalPolicy: RemovalPolicy.RETAIN,
   autoDeleteObjects: false,
   reservedConcurrency: {
-    orderService: 50,
-    inventoryService: 50,
-    billing: 25,
-    fulfillment: 25,
-    notification: 25,
+    orderService: 200,
+    inventoryService: 100,
+    billing: 50,
+    fulfillment: 50,
+    notification: 100,
   },
 };

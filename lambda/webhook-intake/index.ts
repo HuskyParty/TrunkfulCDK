@@ -38,7 +38,7 @@ export const handler = async (event: any) => {
     logger.info('Webhook intake received', { orderId, channel });
 
     // Idempotency check
-    const isNew = await checkIdempotency(orderId);
+    const isNew = await checkIdempotency(orderId, orderId);
     if (!isNew) {
       logger.warn('Duplicate webhook order detected', { orderId });
       return {

@@ -37,7 +37,30 @@ export const handler = async (event: any) => {
         continue;
       }
 
-      const orders: any[] = JSON.parse(bodyString);
+      // Detect file format from the S3 key extension and parse accordingly
+      const fileExtension = key.split('.').pop()?.toLowerCase();
+      let orders: any[];
+
+      if (fileExtension === 'csv') {
+        const lines = bodyString.split('\n').filter((line) => line.trim() !== '');
+        const headers = lines[0].split(',').map((h) => h.trim());
+        orders = lines.slice(1).map((line) => {
+          const values = line.split(',').map((v) => v.trim());
+          const obj: Record<string, string> = {};
+          headers.forEach((header, idx) => {
+            obj[header] = values[idx] ?? '';
+          });
+          // Normalise: items may be a JSON-encoded column or a plain string
+          return {
+            customerId: obj['customerId'] ?? obj['customer_id'] ?? '',
+            items: obj['items'] ? (() => {
+              try { return JSON.parse(obj['items']); } catch { return [obj['items']]; }
+            })() : [],
+          };
+        });
+      } else {
+        orders = JSON.parse(bodyString);
+      }
 
       const tableName = process.env.ORDERS_TABLE;
       if (!tableName) {
@@ -49,7 +72,7 @@ export const handler = async (event: any) => {
         const createdAt = new Date().toISOString();
 
         // Idempotency check
-        const isNew = await checkIdempotency(orderId);
+        const isNew = await checkIdempotency(orderId, orderId);
         if (!isNew) {
           logger.warn('Duplicate warehouse order detected', { orderId });
           continue;

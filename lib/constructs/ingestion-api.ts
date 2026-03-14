@@ -7,6 +7,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Duration } from 'aws-cdk-lib';
 import * as path from 'path';
@@ -55,6 +56,8 @@ export class IngestionApiConstruct extends Construct {
       deployOptions: {
         stageName: 'prod',
         tracingEnabled: true,
+        throttlingRateLimit: 1000,
+        throttlingBurstLimit: 500,
       },
     });
 
@@ -92,6 +95,17 @@ export class IngestionApiConstruct extends Construct {
     // ---------------------------------------------------------------
     // 4. Webhook Intake Lambda
     // ---------------------------------------------------------------
+
+    // Secrets Manager secret for webhook HMAC signing key
+    const webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
+      secretName: `${props.stageName}-trunkful/webhook-secret`,
+      description: `Webhook HMAC signing secret (${props.stageName})`,
+      generateSecretString: {
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+    });
+
     const webhookIntakeFn = new NodejsFunction(this, 'WebhookIntakeFn', {
       functionName: `${props.stageName}-trunkful-webhook-intake`,
       entry: path.join(__dirname, '../../lambda/webhook-intake/index.ts'),
@@ -104,16 +118,88 @@ export class IngestionApiConstruct extends Construct {
         ORDERS_TABLE: props.ordersTable.tableName,
         IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
         EVENT_BUS_NAME: props.eventBus.eventBusName,
-        WEBHOOK_SECRET: 'CHANGE_ME_PLACEHOLDER',
+        WEBHOOK_SECRET_ARN: webhookSecret.secretArn,
       },
     });
 
+    webhookSecret.grantRead(webhookIntakeFn);
     props.ordersTable.grantReadWriteData(webhookIntakeFn);
     props.idempotencyTable.grantReadWriteData(webhookIntakeFn);
     props.eventBus.grantPutEventsTo(webhookIntakeFn);
 
     // ---------------------------------------------------------------
-    // 5. API Routes
+    // 5. Request Schema Validation
+    // ---------------------------------------------------------------
+
+    const orderRequestValidator = new apigateway.RequestValidator(
+      this,
+      'OrderRequestValidator',
+      {
+        restApi: this.api,
+        requestValidatorName: 'OrderRequestBodyValidator',
+        validateRequestBody: true,
+        validateRequestParameters: false,
+      },
+    );
+
+    const orderRequestModel = new apigateway.Model(this, 'OrderRequestModel', {
+      restApi: this.api,
+      modelName: 'OrderRequest',
+      contentType: 'application/json',
+      description: 'Schema for order request body',
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        title: 'OrderRequest',
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ['customerId', 'items'],
+        properties: {
+          customerId: { type: apigateway.JsonSchemaType.STRING },
+          items: {
+            type: apigateway.JsonSchemaType.ARRAY,
+            minItems: 1,
+            items: {
+              type: apigateway.JsonSchemaType.OBJECT,
+              required: ['sku', 'quantity'],
+              properties: {
+                sku: { type: apigateway.JsonSchemaType.STRING },
+                quantity: {
+                  type: apigateway.JsonSchemaType.INTEGER,
+                  minimum: 1,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // ---------------------------------------------------------------
+    // 6. API Key + Usage Plan for supplier webhooks
+    // ---------------------------------------------------------------
+
+    const supplierApiKey = new apigateway.ApiKey(this, 'SupplierWebhookApiKey', {
+      apiKeyName: `${props.stageName}-trunkful-supplier-webhook-key`,
+      description: 'API key for supplier webhook authentication',
+      enabled: true,
+    });
+
+    const webhookUsagePlan = new apigateway.UsagePlan(
+      this,
+      'SupplierWebhookUsagePlan',
+      {
+        name: `${props.stageName}-SupplierWebhookUsagePlan`,
+        description: 'Usage plan with throttling for supplier webhook endpoints',
+        throttle: {
+          rateLimit: 100,
+          burstLimit: 50,
+        },
+      },
+    );
+
+    webhookUsagePlan.addApiKey(supplierApiKey);
+
+    // ---------------------------------------------------------------
+    // 7. API Routes
     // ---------------------------------------------------------------
 
     // POST /orders — Cognito-authorized order intake
@@ -124,22 +210,44 @@ export class IngestionApiConstruct extends Construct {
       {
         authorizer: cognitoAuthorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,
+        requestValidator: orderRequestValidator,
+        requestModels: {
+          'application/json': orderRequestModel,
+        },
       },
     );
 
-    // POST /webhooks/orders — webhook intake (secret validated in Lambda)
+    // POST /webhooks/orders — webhook intake (API key required; secret fetched from Secrets Manager in Lambda)
     const webhooksResource = this.api.root.addResource('webhooks');
     const webhooksOrdersResource = webhooksResource.addResource('orders');
-    webhooksOrdersResource.addMethod(
+    const webhookMethod = webhooksOrdersResource.addMethod(
       'POST',
       new apigateway.LambdaIntegration(webhookIntakeFn),
       {
         authorizationType: apigateway.AuthorizationType.NONE,
+        apiKeyRequired: true,
+        requestValidator: orderRequestValidator,
+        requestModels: {
+          'application/json': orderRequestModel,
+        },
       },
     );
 
+    webhookUsagePlan.addApiStage({
+      stage: this.api.deploymentStage,
+      throttle: [
+        {
+          method: webhookMethod,
+          throttle: {
+            rateLimit: 100,
+            burstLimit: 50,
+          },
+        },
+      ],
+    });
+
     // ---------------------------------------------------------------
-    // 6. DynamoDB Direct Integration — GET /orders/{orderId} (CQRS read)
+    // 8. DynamoDB Direct Integration — GET /orders/{orderId} (CQRS read)
     // ---------------------------------------------------------------
     const orderIdResource = ordersResource.addResource('{orderId}');
 
@@ -241,7 +349,7 @@ export class IngestionApiConstruct extends Construct {
     });
 
     // ---------------------------------------------------------------
-    // 7. WAF WebACL
+    // 9. WAF WebACL
     // ---------------------------------------------------------------
     const webAcl = new wafv2.CfnWebACL(this, 'TrunkfulWaf', {
       defaultAction: { allow: {} },
@@ -297,6 +405,27 @@ export class IngestionApiConstruct extends Construct {
           visibilityConfig: {
             cloudWatchMetricsEnabled: true,
             metricName: 'RateLimitMetric',
+            sampledRequestsEnabled: true,
+          },
+        },
+        {
+          // Block all traffic originating outside allowed countries.
+          // Uses a NOT geo-match so requests from non-US countries are blocked.
+          name: 'GeoBlockNonUS',
+          priority: 4,
+          action: { block: {} },
+          statement: {
+            notStatement: {
+              statement: {
+                geoMatchStatement: {
+                  countryCodes: ['US'],
+                },
+              },
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'GeoBlockNonUSMetric',
             sampledRequestsEnabled: true,
           },
         },

@@ -79,15 +79,66 @@ export class IngestionIotConstruct extends Construct {
           {
             Effect: 'Allow',
             Action: ['iot:Connect'],
-            Resource: ['*'],
+            Resource: ['arn:aws:iot:*:*:client/${iot:Connection.Thing.ThingName}'],
           },
           {
             Effect: 'Allow',
             Action: ['iot:Publish'],
-            Resource: ['arn:aws:iot:*:*:topic/pos/*/orders'],
+            Resource: ['arn:aws:iot:*:*:topic/pos/${iot:Connection.Thing.ThingName}/orders'],
           },
         ],
       },
+    });
+
+    // ---------------------------------------------------------------
+    // 5. Thing Group for POS terminals
+    // ---------------------------------------------------------------
+    new iot.CfnThingGroup(this, 'PosTerminalThingGroup', {
+      thingGroupName: `${props.stageName}-TrunkfulPosTerminals`,
+    });
+
+    // ---------------------------------------------------------------
+    // 6. Fleet Provisioning Template for POS device certificates
+    // ---------------------------------------------------------------
+    const fleetProvisioningRole = new iam.Role(this, 'FleetProvisioningRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSIoTThingsRegistration'),
+      ],
+    });
+
+    new iot.CfnProvisioningTemplate(this, 'PosFleetProvisioningTemplate', {
+      templateName: `${props.stageName}-TrunkfulPosFleetProvisioning`,
+      provisioningRoleArn: fleetProvisioningRole.roleArn,
+      enabled: true,
+      templateBody: JSON.stringify({
+        Parameters: {
+          SerialNumber: { Type: 'String' },
+          'AWS::IoT::Certificate::Id': { Type: 'String' },
+        },
+        Resources: {
+          certificate: {
+            Type: 'AWS::IoT::Certificate',
+            Properties: {
+              CertificateId: { Ref: 'AWS::IoT::Certificate::Id' },
+              Status: 'Active',
+            },
+          },
+          policy: {
+            Type: 'AWS::IoT::Policy',
+            Properties: {
+              PolicyName: `${props.stageName}-TrunkfulPosDevicePolicy`,
+            },
+          },
+          thing: {
+            Type: 'AWS::IoT::Thing',
+            Properties: {
+              ThingName: { 'Fn::Join': ['', ['pos-device-', { Ref: 'SerialNumber' }]] },
+              ThingGroups: [`${props.stageName}-TrunkfulPosTerminals`],
+            },
+          },
+        },
+      }),
     });
   }
 }

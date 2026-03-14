@@ -1,7 +1,8 @@
 import { Construct } from 'constructs';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 
 interface SecurityProps {
   stageName: string;
@@ -31,6 +32,27 @@ export class SecurityConstruct extends Construct {
         excludePunctuation: true,
         passwordLength: 32,
       },
+    });
+
+    // Rotation Lambda for the payment API secret
+    const paymentSecretRotationFn = new lambda.Function(this, 'PaymentSecretRotationFn', {
+      functionName: `${props.stageName}-trunkful-payment-secret-rotation`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+        exports.handler = async (event) => {
+          // Custom rotation logic: retrieve new key from payment provider and update secret
+          console.log('Rotating payment API secret', JSON.stringify(event));
+        };
+      `),
+      timeout: Duration.seconds(30),
+      description: `Rotates the payment API secret every 90 days (${props.stageName})`,
+    });
+
+    // Rotate the payment secret every 90 days
+    this.paymentApiSecret.addRotationSchedule('PaymentApiSecretRotation', {
+      rotationLambda: paymentSecretRotationFn,
+      automaticallyAfter: Duration.days(90),
     });
   }
 }

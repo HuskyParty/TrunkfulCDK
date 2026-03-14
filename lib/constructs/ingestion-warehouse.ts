@@ -1,7 +1,6 @@
 import { Construct } from 'constructs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Stack } from 'aws-cdk-lib';
 
 interface IngestionWarehouseProps {
   stageName: string;
@@ -21,7 +20,8 @@ export class IngestionWarehouseConstruct extends Construct {
       roleName: `${props.stageName}-TrunkfulWarehouseScannerRole`,
       description:
         'Assumed by warehouse scanner devices to publish inventory events to EventBridge',
-      assumedBy: new iam.AccountPrincipal(Stack.of(this).account),
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      externalIds: [`${props.stageName}-trunkful-warehouse-scanner`],
     });
 
     // Grant the role permission to put events on the bus

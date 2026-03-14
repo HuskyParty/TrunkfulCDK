@@ -29,6 +29,10 @@ export class AnalyticsConstruct extends Construct {
           transitions: [
             {
               storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: Duration.days(30),
+            },
+            {
+              storageClass: s3.StorageClass.GLACIER,
               transitionAfter: Duration.days(90),
             },
           ],
@@ -65,8 +69,77 @@ export class AnalyticsConstruct extends Construct {
       }),
     );
 
+    firehoseRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'glue:GetTable',
+          'glue:GetTableVersion',
+          'glue:GetTableVersions',
+        ],
+        resources: ['*'],
+      }),
+    );
+
     // ---------------------------------------------------------------
-    // 3. Firehose Delivery Stream (L1 CfnDeliveryStream)
+    // 3. Glue Database (moved before Firehose so the ARN is available)
+    // ---------------------------------------------------------------
+    const glueDatabase = new glue.CfnDatabase(this, 'AnalyticsDatabase', {
+      catalogId: this.node.tryGetContext('aws:cdk:account') || '',
+      databaseInput: {
+        name: `${props.stageName}_trunkful_analytics`,
+      },
+    });
+
+    // ---------------------------------------------------------------
+    // 4. Glue Table (Parquet)
+    // ---------------------------------------------------------------
+    const glueTable = new glue.CfnTable(this, 'OrderEventsTable', {
+      catalogId: glueDatabase.catalogId,
+      databaseName: `${props.stageName}_trunkful_analytics`,
+      tableInput: {
+        name: 'order_events',
+        tableType: 'EXTERNAL_TABLE',
+        parameters: {
+          classification: 'parquet',
+          'parquet.compression': 'SNAPPY',
+        },
+        storageDescriptor: {
+          location: `s3://${dataLakeBucket.bucketName}/events/`,
+          inputFormat:
+            'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat',
+          outputFormat:
+            'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat',
+          serdeInfo: {
+            serializationLibrary:
+              'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe',
+            parameters: {
+              'serialization.format': '1',
+            },
+          },
+          columns: [
+            { name: 'orderId', type: 'string' },
+            { name: 'channel', type: 'string' },
+            { name: 'status', type: 'string' },
+            { name: 'customerId', type: 'string' },
+            { name: 'timestamp', type: 'string' },
+            { name: 'eventType', type: 'string' },
+            { name: 'amount', type: 'double' },
+            { name: 'currency', type: 'string' },
+            { name: 'items', type: 'string' },
+          ],
+        },
+        partitionKeys: [
+          { name: 'year', type: 'string' },
+          { name: 'month', type: 'string' },
+          { name: 'day', type: 'string' },
+          { name: 'eventType', type: 'string' },
+        ],
+      },
+    });
+    glueTable.addDependency(glueDatabase);
+
+    // ---------------------------------------------------------------
+    // 5. Firehose Delivery Stream (L1 CfnDeliveryStream)
     // ---------------------------------------------------------------
     this.analyticsDeliveryStream = new firehose.CfnDeliveryStream(
       this,
@@ -77,65 +150,57 @@ export class AnalyticsConstruct extends Construct {
           bucketArn: dataLakeBucket.bucketArn,
           roleArn: firehoseRole.roleArn,
           prefix:
-            'events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/',
-          errorOutputPrefix: 'errors/',
+            'events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/eventType=!{partitionKeyFromQuery:eventType}/',
+          errorOutputPrefix: 'errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/',
           bufferingHints: {
             intervalInSeconds: 60,
-            sizeInMBs: 64,
+            sizeInMBs: 1,
           },
-          compressionFormat: 'GZIP',
+          dynamicPartitioningConfiguration: {
+            enabled: true,
+          },
+          processingConfiguration: {
+            enabled: true,
+            processors: [
+              {
+                type: 'MetadataExtraction',
+                parameters: [
+                  {
+                    parameterName: 'MetadataExtractionQuery',
+                    parameterValue: '{eventType:.eventType}',
+                  },
+                  {
+                    parameterName: 'JsonParsingEngine',
+                    parameterValue: 'JQ-1.6',
+                  },
+                ],
+              },
+            ],
+          },
+          dataFormatConversionConfiguration: {
+            enabled: true,
+            inputFormatConfiguration: {
+              deserializer: {
+                openXJsonSerDe: {},
+              },
+            },
+            outputFormatConfiguration: {
+              serializer: {
+                parquetSerDe: {},
+              },
+            },
+            schemaConfiguration: {
+              roleArn: firehoseRole.roleArn,
+              databaseName: `${props.stageName}_trunkful_analytics`,
+              tableName: 'order_events',
+              region: this.node.tryGetContext('aws:cdk:region') || 'us-east-1',
+              versionId: 'LATEST',
+            },
+          },
         },
       },
     );
-
-    // ---------------------------------------------------------------
-    // 4. Glue Database
-    // ---------------------------------------------------------------
-    const glueDatabase = new glue.CfnDatabase(this, 'AnalyticsDatabase', {
-      catalogId: this.node.tryGetContext('aws:cdk:account') || '',
-      databaseInput: {
-        name: `${props.stageName}_trunkful_analytics`,
-      },
-    });
-
-    // ---------------------------------------------------------------
-    // 5. Glue Table
-    // ---------------------------------------------------------------
-    new glue.CfnTable(this, 'OrderEventsTable', {
-      catalogId: glueDatabase.catalogId,
-      databaseName: 'trunkful_analytics',
-      tableInput: {
-        name: 'order_events',
-        tableType: 'EXTERNAL_TABLE',
-        parameters: {
-          classification: 'json',
-        },
-        storageDescriptor: {
-          location: `s3://${dataLakeBucket.bucketName}/events/`,
-          inputFormat:
-            'org.apache.hadoop.mapred.TextInputFormat',
-          outputFormat:
-            'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat',
-          serdeInfo: {
-            serializationLibrary:
-              'org.openx.data.jsonserde.JsonSerDe',
-          },
-          columns: [
-            { name: 'orderId', type: 'string' },
-            { name: 'channel', type: 'string' },
-            { name: 'status', type: 'string' },
-            { name: 'customerId', type: 'string' },
-            { name: 'timestamp', type: 'string' },
-            { name: 'eventType', type: 'string' },
-          ],
-        },
-        partitionKeys: [
-          { name: 'year', type: 'string' },
-          { name: 'month', type: 'string' },
-          { name: 'day', type: 'string' },
-        ],
-      },
-    }).addDependency(glueDatabase);
+    this.analyticsDeliveryStream.addDependency(glueTable);
 
     // ---------------------------------------------------------------
     // 6. Athena WorkGroup

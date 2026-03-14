@@ -21,7 +21,7 @@ export const handler = async (event: any) => {
     logger.info('Order intake received', { orderId, channel });
 
     // Idempotency check
-    const isNew = await checkIdempotency(orderId);
+    const isNew = await checkIdempotency(orderId, orderId);
     if (!isNew) {
       logger.warn('Duplicate order detected', { orderId });
       return {

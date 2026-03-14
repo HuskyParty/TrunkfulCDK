@@ -38,6 +38,7 @@ export class TrunkfulStack extends cdk.Stack {
     const dataLayer = new DataLayerConstruct(this, 'DataLayer', {
       stageName,
       removalPolicy: config.removalPolicy,
+      piiKey: security.piiEncryptionKey,
     });
     const eventBusConstruct = new EventBusConstruct(this, 'EventBus', {
       stageName,
@@ -131,7 +132,7 @@ export class TrunkfulStack extends cdk.Stack {
       targets: [new targets.SqsQueue(queues.orderQueue)],
     });
 
-    // Rule 2: OrderCreated + InventoryReceived + ReturnInitiated → Inventory Queue
+    // Rule 2: OrderCreated + InventoryReceived + ReturnInitiated + InventoryAdjusted → Inventory Queue
     new events.Rule(this, 'InventoryEventsToInventoryQueue', {
       eventBus: bus,
       ruleName: `${stageName}-InventoryEventsToInventoryQueue`,
@@ -141,29 +142,30 @@ export class TrunkfulStack extends cdk.Stack {
           'OrderCreated',
           'InventoryReceived',
           'ReturnInitiated',
+          'InventoryAdjusted',
         ],
       },
       targets: [new targets.SqsQueue(queues.inventoryQueue)],
     });
 
-    // Rule 3: OrderConfirmed → Billing Queue
-    new events.Rule(this, 'OrderConfirmedToBillingQueue', {
+    // Rule 3: OrderConfirmed + OrderFailed → Billing Queue
+    new events.Rule(this, 'OrderCompleteToBillingQueue', {
       eventBus: bus,
-      ruleName: `${stageName}-OrderConfirmedToBillingQueue`,
+      ruleName: `${stageName}-OrderCompleteToBillingQueue`,
       eventPattern: {
         source: ['trunkful.orders'],
-        detailType: ['OrderConfirmed'],
+        detailType: ['OrderConfirmed', 'OrderFailed'],
       },
       targets: [new targets.SqsQueue(queues.billingQueue)],
     });
 
-    // Rule 4: OrderConfirmed → Fulfillment Queue
-    new events.Rule(this, 'OrderConfirmedToFulfillmentQueue', {
+    // Rule 4: OrderConfirmed + OrderFailed → Fulfillment Queue
+    new events.Rule(this, 'OrderCompleteToFulfillmentQueue', {
       eventBus: bus,
-      ruleName: `${stageName}-OrderConfirmedToFulfillmentQueue`,
+      ruleName: `${stageName}-OrderCompleteToFulfillmentQueue`,
       eventPattern: {
         source: ['trunkful.orders'],
-        detailType: ['OrderConfirmed'],
+        detailType: ['OrderConfirmed', 'OrderFailed'],
       },
       targets: [new targets.SqsQueue(queues.fulfillmentQueue)],
     });

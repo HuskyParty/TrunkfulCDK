@@ -13,7 +13,7 @@ export const handler = async (event: any) => {
   }
 
   try {
-    const result = await processPayment(order.orderId, order.totalAmount);
+    const result = await processPayment(order.orderId, order.totalAmount, order.orderId);
     if (!result.success) {
       throw new Error('Payment declined');
     }

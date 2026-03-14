@@ -52,6 +52,7 @@ async function getCircuitRecord(
 async function putCircuitRecord(
   serviceName: string,
   record: CircuitRecord,
+  expectedState?: CircuitState,
 ): Promise<void> {
   const key = `CIRCUIT#${serviceName}`;
   await ddb.send(
@@ -63,6 +64,15 @@ async function putCircuitRecord(
         state: { S: record.state },
         failureCount: { N: String(record.failureCount) },
         lastFailureTime: { N: String(record.lastFailureTime) },
+      },
+      // Ensure atomic state transitions: only write if the record does not
+      // yet exist OR the current state matches the caller's expected state.
+      ConditionExpression: 'attribute_not_exists(pk) OR #state = :expectedState',
+      ExpressionAttributeNames: {
+        '#state': 'state',
+      },
+      ExpressionAttributeValues: {
+        ':expectedState': { S: expectedState ?? record.state },
       },
     }),
   );
@@ -88,10 +98,7 @@ export async function checkCircuit(
     const elapsed = Date.now() - record.lastFailureTime;
     if (elapsed >= COOLDOWN_MS) {
       // Transition to HALF_OPEN so a single probe can go through
-      await putCircuitRecord(serviceName, {
-        ...record,
-        state: 'HALF_OPEN',
-      });
+      await putCircuitRecord(serviceName, { ...record, state: 'HALF_OPEN' }, 'OPEN');
       return 'HALF_OPEN';
     }
     return 'OPEN';
@@ -104,11 +111,12 @@ export async function checkCircuit(
  * Record a successful call. Resets the circuit back to CLOSED.
  */
 export async function recordSuccess(serviceName: string): Promise<void> {
-  await putCircuitRecord(serviceName, {
-    state: 'CLOSED',
-    failureCount: 0,
-    lastFailureTime: 0,
-  });
+  const existing = await getCircuitRecord(serviceName);
+  await putCircuitRecord(
+    serviceName,
+    { state: 'CLOSED', failureCount: 0, lastFailureTime: 0 },
+    existing?.state,
+  );
 }
 
 /**
@@ -129,9 +137,9 @@ export async function recordFailure(serviceName: string): Promise<void> {
   const newState: CircuitState =
     failureCount >= FAILURE_THRESHOLD ? 'OPEN' : 'CLOSED';
 
-  await putCircuitRecord(serviceName, {
-    state: newState,
-    failureCount,
-    lastFailureTime: now,
-  });
+  await putCircuitRecord(
+    serviceName,
+    { state: newState, failureCount, lastFailureTime: now },
+    existing?.state,
+  );
 }

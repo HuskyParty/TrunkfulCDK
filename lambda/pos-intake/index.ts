@@ -21,7 +21,7 @@ export const handler = async (event: any) => {
     logger.info('POS intake received', { orderId, deviceId, channel });
 
     // Idempotency check
-    const isNew = await checkIdempotency(orderId);
+    const isNew = await checkIdempotency(orderId, orderId);
     if (!isNew) {
       logger.warn('Duplicate POS order detected', { orderId, deviceId });
       return { statusCode: 200 };

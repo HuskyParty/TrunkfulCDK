@@ -1,4 +1,5 @@
 import { Construct } from 'constructs';
+import * as cdk from 'aws-cdk-lib';
 import * as events from 'aws-cdk-lib/aws-events';
 import { Duration } from 'aws-cdk-lib';
 
@@ -17,12 +18,12 @@ export class EventBusConstruct extends Construct {
       eventBusName: `${props.stageName}-TrunkfulEventBus`,
     });
 
-    // Archive all order events for 90 days for replay / auditing
+    // Archive all events for 90 days for replay / auditing
     this.bus.archive('TrunkfulArchive', {
       archiveName: `${props.stageName}-TrunkfulArchive`,
-      description: `Archive of Trunkful order events (${props.stageName})`,
+      description: `Archive of all Trunkful events (${props.stageName})`,
       eventPattern: {
-        source: ['trunkful.orders'],
+        account: [cdk.Stack.of(this).account],
       },
       retention: Duration.days(90),
     });

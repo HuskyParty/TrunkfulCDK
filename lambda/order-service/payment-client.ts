@@ -13,8 +13,9 @@ const logger = {
 export async function processPayment(
   orderId: string,
   amount: number,
+  idempotencyKey: string,
 ): Promise<{ success: boolean; transactionId: string }> {
-  logger.info('Processing payment', { orderId, amount });
+  logger.info('Processing payment', { orderId, amount, idempotencyKey });
 
   // Simulate a short processing delay
   await new Promise((resolve) => setTimeout(resolve, 50));

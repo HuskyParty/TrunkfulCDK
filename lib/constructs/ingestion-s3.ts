@@ -1,6 +1,7 @@
 import { Construct } from 'constructs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -45,7 +46,48 @@ export class IngestionS3Construct extends Construct {
     });
 
     // ---------------------------------------------------------------
-    // 2. Admin Ingest Lambda
+    // 2. Admin IAM Role for uploads (used in bucket policy)
+    // ---------------------------------------------------------------
+    const adminRole = new iam.Role(this, 'AdminUploadRole', {
+      roleName: `${props.stageName}-TrunkfulAdminUploadRole`,
+      description: 'IAM role for administrators to upload order files to the ingestion bucket',
+      assumedBy: new iam.AccountRootPrincipal(),
+    });
+
+    // Bucket policy: deny PutObject from any principal that is NOT the admin role,
+    // and require MFA for all uploads.
+    this.uploadBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'DenyPutObjectIfNotAdminRole',
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ['s3:PutObject'],
+        resources: [this.uploadBucket.arnForObjects('*')],
+        conditions: {
+          StringNotLike: {
+            'aws:PrincipalArn': adminRole.roleArn,
+          },
+        },
+      }),
+    );
+
+    this.uploadBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'DenyPutObjectWithoutMFA',
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ['s3:PutObject'],
+        resources: [this.uploadBucket.arnForObjects('*')],
+        conditions: {
+          BoolIfExists: {
+            'aws:MultiFactorAuthPresent': 'false',
+          },
+        },
+      }),
+    );
+
+    // ---------------------------------------------------------------
+    // 3. Admin Ingest Lambda
     // ---------------------------------------------------------------
     const adminIngestFn = new NodejsFunction(this, 'AdminIngestFn', {
       functionName: `${props.stageName}-trunkful-admin-ingest`,
@@ -68,7 +110,7 @@ export class IngestionS3Construct extends Construct {
     this.uploadBucket.grantRead(adminIngestFn);
 
     // ---------------------------------------------------------------
-    // 3. S3 Event Notification → Lambda on OBJECT_CREATED
+    // 4. S3 Event Notification → Lambda on OBJECT_CREATED
     // ---------------------------------------------------------------
     this.uploadBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,

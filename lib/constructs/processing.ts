@@ -69,7 +69,10 @@ export class ProcessingConstruct extends Construct {
     };
 
     const validateFn = createStepFn('OrderValidate', 'order-steps/validate.ts', orderEnv);
-    const reserveInventoryFn = createStepFn('OrderReserve', 'order-steps/reserve-inventory.ts', orderEnv);
+    const reserveInventoryFn = createStepFn('OrderReserve', 'order-steps/reserve-inventory.ts', {
+      ...orderEnv,
+      INVENTORY_TABLE: props.inventoryTable.tableName,
+    });
     const processPaymentFn = createStepFn('OrderPayment', 'order-steps/process-payment.ts', {
       ORDERS_TABLE: props.ordersTable.tableName,
     }, 15);
@@ -78,15 +81,26 @@ export class ProcessingConstruct extends Construct {
       EVENT_BUS_NAME: props.eventBus.eventBusName,
     });
     const markFailedFn = createStepFn('OrderMarkFailed', 'order-steps/mark-failed.ts', orderEnv);
+    const emitEventFn = createStepFn('OrderEmitEvent', 'order-steps/emit-event.ts', {
+      EVENT_BUS_NAME: props.eventBus.eventBusName,
+    });
 
-    // Permissions for order step lambdas
-    for (const fn of [validateFn, reserveInventoryFn, confirmOrderFn, markFailedFn]) {
-      props.ordersTable.grantReadWriteData(fn);
+    // Permissions for order step lambdas — scoped to minimum required actions
+    for (const fn of [validateFn, confirmOrderFn, markFailedFn]) {
+      props.ordersTable.grant(fn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
       props.eventBus.grantPutEventsTo(fn);
     }
-    props.ordersTable.grantReadWriteData(processPaymentFn); // circuit breaker state
+
+    // reserveInventoryFn needs GetItem/UpdateItem on both Orders and Inventory tables
+    props.ordersTable.grant(reserveInventoryFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
+    props.inventoryTable.grant(reserveInventoryFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
+    props.eventBus.grantPutEventsTo(reserveInventoryFn);
+
+    props.ordersTable.grant(processPaymentFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem'); // circuit breaker state
     props.paymentSecret.grantRead(processPaymentFn);
     props.eventBus.grantPutEventsTo(releaseInventoryFn);
+    // emitEventFn only needs to put events on the bus
+    props.eventBus.grantPutEventsTo(emitEventFn);
 
     // =================================================================
     // 2. Order Saga — Step Functions State Machine
@@ -98,6 +112,20 @@ export class ProcessingConstruct extends Construct {
       payloadResponseOnly: true,
       resultPath: sfn.JsonPath.DISCARD,
     });
+
+    const emitOrderFailedEarly = new tasks.LambdaInvoke(this, 'EmitOrderFailedEarly', {
+      lambdaFunction: emitEventFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      payload: sfn.TaskInput.fromObject({
+        'eventType': 'OrderFailed',
+        'orderId.$': '$.orderId',
+        'reason.$': '$.error.Cause',
+      }),
+    });
+
+    // Early failure path: mark failed then emit event
+    markFailedEarly.next(emitOrderFailedEarly);
 
     const compensateRelease = new tasks.LambdaInvoke(this, 'CompensateRelease', {
       lambdaFunction: releaseInventoryFn,
@@ -111,7 +139,19 @@ export class ProcessingConstruct extends Construct {
       resultPath: sfn.JsonPath.DISCARD,
     });
 
-    compensateRelease.next(markFailedAfterComp);
+    const emitOrderFailed = new tasks.LambdaInvoke(this, 'EmitOrderFailed', {
+      lambdaFunction: emitEventFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      payload: sfn.TaskInput.fromObject({
+        'eventType': 'OrderFailed',
+        'orderId.$': '$.orderId',
+        'reason.$': '$.error.Cause',
+      }),
+    });
+
+    // Compensated failure path: release inventory → mark failed → emit event
+    compensateRelease.next(markFailedAfterComp).next(emitOrderFailed);
 
     // Main saga steps
     const validateOrder = new tasks.LambdaInvoke(this, 'ValidateOrder', {
@@ -138,28 +178,55 @@ export class ProcessingConstruct extends Construct {
       resultPath: sfn.JsonPath.DISCARD,
     });
 
-    // Catch: before inventory reserved → mark failed only
+    const emitOrderConfirmed = new tasks.LambdaInvoke(this, 'EmitOrderConfirmed', {
+      lambdaFunction: emitEventFn,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      payload: sfn.TaskInput.fromObject({
+        'eventType': 'OrderConfirmed',
+        'orderId.$': '$.orderId',
+      }),
+    });
+
+    // Catch: before inventory reserved → mark failed then emit
     validateOrder.addCatch(markFailedEarly, { resultPath: '$.error' });
     reserveInventory.addCatch(markFailedEarly, { resultPath: '$.error' });
 
-    // Catch: after inventory reserved → release then mark failed
+    // Catch: after inventory reserved → release then mark failed then emit
     processPayment.addCatch(compensateRelease, { resultPath: '$.error' });
     confirmOrder.addCatch(compensateRelease, { resultPath: '$.error' });
 
-    // Add per-step retry for transient errors
-    for (const step of [validateOrder, reserveInventory, processPayment, confirmOrder]) {
-      step.addRetry({
-        errors: ['States.TaskFailed'],
-        maxAttempts: 2,
-        backoffRate: 2,
-        interval: Duration.seconds(1),
-      });
-    }
+    // Per-state retry configuration for transient errors
+    validateOrder.addRetry({
+      errors: ['States.TaskFailed'],
+      maxAttempts: 1,
+      interval: Duration.seconds(1),
+      backoffRate: 2,
+    });
+    reserveInventory.addRetry({
+      errors: ['States.TaskFailed'],
+      maxAttempts: 2,
+      interval: Duration.seconds(1),
+      backoffRate: 2,
+    });
+    processPayment.addRetry({
+      errors: ['States.TaskFailed'],
+      maxAttempts: 3,
+      interval: Duration.seconds(2),
+      backoffRate: 3,
+    });
+    confirmOrder.addRetry({
+      errors: ['States.TaskFailed'],
+      maxAttempts: 2,
+      interval: Duration.seconds(1),
+      backoffRate: 2,
+    });
 
     const orderSagaChain = validateOrder
       .next(reserveInventory)
       .next(processPayment)
-      .next(confirmOrder);
+      .next(confirmOrder)
+      .next(emitOrderConfirmed);
 
     const orderSagaSM = new sfn.StateMachine(this, 'OrderSagaSM', {
       stateMachineName: `${props.stageName}-trunkful-order-saga`,
@@ -172,8 +239,18 @@ export class ProcessingConstruct extends Construct {
     // 3. Order Saga — Starter Lambda (SQS → Step Functions)
     // =================================================================
 
-    const orderSagaTriggerFn = createStepFn('OrderSagaTrigger', 'order-steps/trigger.ts', {
-      STATE_MACHINE_ARN: orderSagaSM.stateMachineArn,
+    const orderSagaTriggerFn = new NodejsFunction(this, 'OrderSagaTrigger', {
+      functionName: `${props.stageName}-trunkful-order-saga-trigger`,
+      entry: path.join(lambdaDir, 'order-steps/trigger.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: Duration.seconds(10),
+      memorySize: 128,
+      tracing: lambda.Tracing.ACTIVE,
+      reservedConcurrentExecutions: props.reservedConcurrency.orderService,
+      environment: {
+        STATE_MACHINE_ARN: orderSagaSM.stateMachineArn,
+      },
     });
 
     orderSagaSM.grantStartExecution(orderSagaTriggerFn);
@@ -256,8 +333,18 @@ export class ProcessingConstruct extends Construct {
     // 6. Inventory Workflow — Starter Lambda (SQS → Step Functions)
     // =================================================================
 
-    const inventoryWorkflowTriggerFn = createStepFn('InventoryWorkflowTrigger', 'inventory-steps/trigger.ts', {
-      STATE_MACHINE_ARN: inventoryWorkflowSM.stateMachineArn,
+    const inventoryWorkflowTriggerFn = new NodejsFunction(this, 'InventoryWorkflowTrigger', {
+      functionName: `${props.stageName}-trunkful-inventory-workflow-trigger`,
+      entry: path.join(lambdaDir, 'inventory-steps/trigger.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: Duration.seconds(10),
+      memorySize: 128,
+      tracing: lambda.Tracing.ACTIVE,
+      reservedConcurrentExecutions: props.reservedConcurrency.inventoryService,
+      environment: {
+        STATE_MACHINE_ARN: inventoryWorkflowSM.stateMachineArn,
+      },
     });
 
     inventoryWorkflowSM.grantStartExecution(inventoryWorkflowTriggerFn);
@@ -338,6 +425,10 @@ export class ProcessingConstruct extends Construct {
     props.ordersTable.grantReadData(notificationFn);
     props.eventBus.grantPutEventsTo(notificationFn);
     props.piiKey.grantDecrypt(notificationFn);
+    notificationFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ses:SendEmail', 'sns:Publish'],
+      resources: ['*'],
+    }));
 
     notificationFn.addEventSource(
       new SqsEventSource(props.notificationQueue, { batchSize: 5 }),
